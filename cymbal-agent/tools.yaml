@@ -1,0 +1,5 @@
+sources:
+  operations-db:
+    kind: bigtable
+    project: pvelevate-project
+    instance: operations-db
