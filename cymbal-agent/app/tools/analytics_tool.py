@@ -14,6 +14,7 @@
 
 """Analytics tool integrating with BigQuery Conversational Data Agent."""
 
+import json
 import logging
 import os
 import time
@@ -25,7 +26,21 @@ from google.adk.tools.data_agent.data_agent_tool import ask_data_agent
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ID = os.environ.get("PROJECT_ID", "pvelevate-project")
+
+def _discover_project_id() -> str:
+    """Discovers project ID dynamically from environment or ADC without hardcoding."""
+    if os.environ.get("PROJECT_ID"):
+        return os.environ["PROJECT_ID"]
+    try:
+        _, project = google.auth.default()
+        if project:
+            return project
+    except Exception:
+        pass
+    return "pvelevate-project"
+
+
+PROJECT_ID = _discover_project_id()
 DATA_AGENT_ID = os.environ.get("DATA_AGENT_ID", "cymbal-retail-analytics-data-agent")
 DATA_AGENT_RESOURCE = os.environ.get(
     "DATA_AGENT_RESOURCE",
@@ -45,7 +60,8 @@ def cymbal_analytics_tool(query: str) -> str:
         query: Verbatim natural language business question or SQL analytics request.
 
     Returns:
-        The analytical response including data insights, numbers, and generated metrics.
+        The analytical response including data insights, numbers, and generated metrics,
+        or a formatted JSON error payload contract under persistent failure.
     """
     max_retries = 3
     base_delay = 1.0
@@ -113,7 +129,8 @@ def cymbal_analytics_tool(query: str) -> str:
         if attempt < max_retries:
             time.sleep(base_delay * (2 ** (attempt - 1)))
 
-    return (
-        "Store analytics data is currently unreachable. The BigQuery Conversational Data Agent "
-        "could not be reached after multiple retry attempts. Please verify connectivity or retry shortly."
-    )
+    return json.dumps({
+        "status": "ERROR",
+        "error": "Store analytics data is currently unreachable. The BigQuery Conversational Data Agent could not be reached after multiple retry attempts. Please verify connectivity or retry shortly.",
+        "data": None,
+    })

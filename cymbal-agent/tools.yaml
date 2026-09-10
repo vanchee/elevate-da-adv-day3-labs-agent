@@ -3,3 +3,14 @@ sources:
     kind: bigtable
     project: pvelevate-project
     instance: operations-db
+
+tools:
+  read_cashier_realtime_alerts:
+    kind: bigtable-sql
+    source: operations-db
+    description: "Reads live 1-hour rolling metrics and audit status flags for a cashier from Cloud Bigtable cashier_realtime_alerts using GoogleSQL."
+    statement: "SELECT * FROM cashier_realtime_alerts WHERE CAST(_key AS STRING) LIKE @prefix"
+    parameters:
+      - name: prefix
+        type: string
+        description: "Row key prefix pattern matching STORE_xxx#CASH_yyyy% (e.g. STORE_048#CASH_1190%)"

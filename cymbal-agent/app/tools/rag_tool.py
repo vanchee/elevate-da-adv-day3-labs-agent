@@ -20,14 +20,35 @@ import re
 import time
 from typing import Optional
 
+import google.auth
 from google.cloud import bigquery
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ID = os.environ.get("PROJECT_ID", "pvelevate-project")
+
+def _discover_project_id() -> str:
+    """Discovers project ID dynamically from environment or ADC without hardcoding."""
+    if os.environ.get("PROJECT_ID"):
+        return os.environ["PROJECT_ID"]
+    try:
+        _, project = google.auth.default()
+        if project:
+            return project
+    except Exception:
+        pass
+    return "pvelevate-project"
+
+
+PROJECT_ID = _discover_project_id()
 DATASET_ID = "cymbal_gold"
 CHUNK_TABLE_ID = f"{PROJECT_ID}.{DATASET_ID}.pos_manual_chunk_embeddings"
 SIMILARITY_THRESHOLD = 0.70
+
+OUT_OF_SCOPE_DECLINE_STRING = (
+    "WARNING: Out-of-scope query. No certified POS hardware documentation found for this query "
+    "(similarity score below certified threshold 0.70). "
+    "This system only supports Cymbal POS terminal hardware and peripheral troubleshooting."
+)
 
 
 def _format_gcs_link(uri: Optional[str]) -> str:
@@ -55,6 +76,10 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
     max_retries = 3
     base_delay = 1.0
 
+    # Extract hardware error codes (e.g. ERR-PAY-4001, ERR-DN-PRNT-24V)
+    error_code_matches = re.findall(r'[A-Z]{3,}-[A-Z0-9\-]+', query)
+    error_code = error_code_matches[0] if error_code_matches else ""
+
     client = bigquery.Client(project=PROJECT_ID)
 
     vector_sql = f"""
@@ -68,7 +93,13 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
         m.base.equipment_covered,
         m.base.source_pdf_uri,
         m.base.chunk_index,
-        ROUND(1 - m.distance, 4) AS similarity_score
+        m.base.chunk_content,
+        ROUND(1 - m.distance, 4) AS base_similarity_score,
+        CASE
+          WHEN @error_code != '' AND m.base.chunk_content LIKE CONCAT('%', @error_code, '%')
+          THEN LEAST(1.0, ROUND(1 - m.distance, 4) + 0.20)
+          ELSE ROUND(1 - m.distance, 4)
+        END AS similarity_score
       FROM VECTOR_SEARCH(
         TABLE `{CHUNK_TABLE_ID}`,
         'embedding',
@@ -96,10 +127,11 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
 
     for attempt in range(1, max_retries + 1):
         try:
-            logger.info("Executing VECTOR_SEARCH on POS chunks (attempt %d): %s", attempt, query)
+            logger.info("Executing VECTOR_SEARCH on POS chunks (attempt %d): %s (error_code: %s)", attempt, query, error_code)
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
-                    bigquery.ScalarQueryParameter("query_text", "STRING", query)
+                    bigquery.ScalarQueryParameter("query_text", "STRING", query),
+                    bigquery.ScalarQueryParameter("error_code", "STRING", error_code),
                 ]
             )
             rows = list(client.query(vector_sql, job_config=job_config).result())
@@ -124,9 +156,12 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
             # Similarity threshold not met or no vector match; trigger full-text search fallback
             logger.info("Vector similarity below %.2f or empty; triggering full-text search fallback", SIMILARITY_THRESHOLD)
 
-            # Extract hardware error codes or keywords (e.g. ERR-PAY-4001)
-            error_codes = re.findall(r'[A-Z]{3,}-[A-Z0-9\-]+', query)
-            search_term = error_codes[0] if error_codes else query
+            # Format search_term for BigQuery SEARCH() syntax
+            if error_code:
+                search_term = f"`{error_code}`"
+            else:
+                clean_tokens = re.findall(r'[a-zA-Z0-9]+', query)
+                search_term = " ".join(clean_tokens) if clean_tokens else query
 
             fallback_sql = f"""
             SELECT
@@ -135,14 +170,21 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
               equipment_covered,
               source_pdf_uri,
               chunk_index,
-              chunk_content
+              chunk_content,
+              CASE
+                WHEN @error_code != '' AND chunk_content LIKE CONCAT('%', @error_code, '%')
+                THEN 0.85
+                ELSE 0.75
+              END AS boosted_score
             FROM `{CHUNK_TABLE_ID}`
-            WHERE chunk_content LIKE CONCAT('%', @search_term, '%')
+            WHERE SEARCH(chunk_content, @search_term)
+            ORDER BY boosted_score DESC
             LIMIT 1
             """
             fallback_config = bigquery.QueryJobConfig(
                 query_parameters=[
-                    bigquery.ScalarQueryParameter("search_term", "STRING", search_term)
+                    bigquery.ScalarQueryParameter("search_term", "STRING", search_term),
+                    bigquery.ScalarQueryParameter("error_code", "STRING", error_code),
                 ]
             )
             fallback_rows = list(client.query(fallback_sql, job_config=fallback_config).result())
@@ -153,21 +195,18 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
                 equipment = fb_row.equipment_covered or "POS Terminal"
                 doc_link = _format_gcs_link(fb_row.source_pdf_uri)
                 content = fb_row.chunk_content or ""
+                boosted_score = float(fb_row.boosted_score) if fb_row.boosted_score else 0.75
 
                 return (
                     f"### {doc_title} ({equipment}) *(Retrieved via Full-Text Search Fallback)*\n"
-                    f"**Certified Reference Document:** [{fb_row.document_filename or 'Runbook'}]({doc_link})\n\n"
+                    f"**Certified Reference Document:** [{fb_row.document_filename or 'Runbook'}]({doc_link})\n"
+                    f"**Relevance Score:** {boosted_score:.4f}\n\n"
                     f"#### Troubleshooting Procedure:\n"
                     f"{content}"
                 )
 
             # Truly out-of-scope query
-            return (
-                f"WARNING: Out-of-scope query. No certified POS hardware documentation found for '{query}' "
-                f"(similarity score below certified threshold {SIMILARITY_THRESHOLD:.2f}). "
-                f"This system only supports Cymbal POS terminal hardware, peripheral troubleshooting, "
-                f"and certified Toshiba TCx 810 operational runbooks."
-            )
+            return OUT_OF_SCOPE_DECLINE_STRING
 
         except Exception as e:
             logger.warning("Error querying BigQuery RAG table on attempt %d: %s", attempt, str(e))

@@ -12,10 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import google.auth
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
+# Ensure Vertex AI mode is enabled by default using ADC if no Gemini API key is set
+if not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_GENAI_USE_VERTEXAI"):
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+    if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        try:
+            _, project = google.auth.default()
+            if project:
+                os.environ["GOOGLE_CLOUD_PROJECT"] = project
+        except Exception:
+            pass
+    if not os.environ.get("GOOGLE_CLOUD_LOCATION"):
+        os.environ["GOOGLE_CLOUD_LOCATION"] = "us-central1"
 
 from app.agent import root_agent
 
