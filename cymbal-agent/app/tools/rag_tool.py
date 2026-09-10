@@ -45,9 +45,7 @@ CHUNK_TABLE_ID = f"{PROJECT_ID}.{DATASET_ID}.pos_manual_chunk_embeddings"
 SIMILARITY_THRESHOLD = 0.70
 
 OUT_OF_SCOPE_DECLINE_STRING = (
-    "WARNING: Out-of-scope query. No certified POS hardware documentation found for this query "
-    "(similarity score below certified threshold 0.70). "
-    "This system only supports Cymbal POS terminal hardware and peripheral troubleshooting."
+    "I cannot find certified warranty or repair rules for this specific error in our technical repository."
 )
 
 

@@ -21,6 +21,7 @@ is visible to the others.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import os
 
@@ -54,9 +55,39 @@ def get_session_service():
             or os.environ.get("GOOGLE_CLOUD_LOCATION"),
             agent_engine_id=agent_engine_id,
         )
-    from google.adk.sessions.in_memory_session_service import InMemorySessionService
+    from google.adk.sessions.sqlite_session_service import SqliteSessionService
 
-    return InMemorySessionService()
+    if not hasattr(SqliteSessionService, "create_session_sync"):
+        def _create_session_sync(self, user_id: str, app_name: str, **kwargs):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import nest_asyncio
+                    nest_asyncio.apply()
+                    return loop.run_until_complete(self.create_session(user_id=user_id, app_name=app_name, **kwargs))
+            except Exception:
+                pass
+            return asyncio.run(self.create_session(user_id=user_id, app_name=app_name, **kwargs))
+
+        def _get_session_sync(self, session_id: str, **kwargs):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import nest_asyncio
+                    nest_asyncio.apply()
+                    return loop.run_until_complete(self.get_session(session_id=session_id, **kwargs))
+            except Exception:
+                pass
+            return asyncio.run(self.get_session(session_id=session_id, **kwargs))
+
+        SqliteSessionService.create_session_sync = _create_session_sync
+        SqliteSessionService.get_session_sync = _get_session_sync
+
+    db_path = os.environ.get(
+        "SQLITE_DB_PATH", os.path.join(_AGENT_DIR, "app", ".adk", "session.db")
+    )
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    return SqliteSessionService(db_path=db_path)
 
 
 @functools.cache

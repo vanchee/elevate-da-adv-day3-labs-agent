@@ -54,6 +54,9 @@ def _discover_project_id() -> str:
 PROJECT_ID = _discover_project_id()
 BIGTABLE_INSTANCE_ID = os.environ.get("BIGTABLE_INSTANCE_ID", "operations-db")
 BIGTABLE_TABLE_ID = os.environ.get("BIGTABLE_TABLE_ID", "cashier_realtime_alerts")
+BIGTABLE_ENRICHED_TABLE_ID = os.environ.get(
+    "BIGTABLE_ENRICHED_TABLE_ID", "pos_transactions_enriched"
+)
 BIGTABLE_MCP_SERVICE_URL = os.environ.get(
     "BIGTABLE_MCP_SERVICE_URL",
     "https://mcp-toolbox-bigtable-797556643923.us-central1.run.app",
@@ -265,6 +268,237 @@ def read_cashier_realtime_alerts(store_id: str, cashier_id: str) -> str:
     )
 
 
+def _format_enriched_response(store_formatted: str, parsed_records: List[Dict[str, Any]]) -> str:
+    formatted_output = [
+        f"### Cloud Bigtable Enriched Transactions: `{BIGTABLE_ENRICHED_TABLE_ID}`",
+        f"- **Target Store:** `{store_formatted}`",
+        f"- **Matched Records:** {len(parsed_records)}",
+    ]
+    for idx, rec in enumerate(parsed_records, 1):
+        formatted_output.append(
+            f"\n#### Transaction #{idx}: `{rec.get('transaction_id', rec['row_key'])}`\n"
+            f"- **Cashier:** `{rec.get('cashier_id', 'N/A')}` | **POS Terminal:** `{rec.get('pos_terminal_id', 'N/A')}`\n"
+            f"- **Timestamp:** `{rec.get('event_timestamp', 'N/A')}`\n"
+            f"- **Total:** `${rec.get('total', 0.0):.2f}` (Subtotal: `${rec.get('subtotal_amount', 0.0):.2f}`, Discount: `${rec.get('discount', 0.0):.2f}`)\n"
+            f"- **Promo Code:** `{rec.get('promo_code_applied', 'NONE')}` | **Manual Override:** `{rec.get('manual_discount_flag', False)}`\n"
+            f"- **Anomaly Alerts:** `{json.dumps(rec.get('anomaly_alerts', {}))}`"
+        )
+    formatted_output.append(f"\n```json\n{json.dumps(parsed_records, indent=2)}\n```")
+    return "\n".join(formatted_output)
+
+
+def read_pos_transactions_enriched(
+    store_id: str,
+    cashier_id: Optional[str] = None,
+    transaction_id: Optional[str] = None,
+) -> str:
+    """Queries Cloud Bigtable pos_transactions_enriched for frontline POS transactions and anomaly flags.
+
+    Provides point-lookup or recent transaction history for a specific store,
+    cashier, or transaction ID, returning enriched transaction details and fraud/anomaly risk scores.
+
+    Args:
+        store_id: Store identifier (e.g., 'STORE_048' or '48').
+        cashier_id: Cashier identifier (e.g., 'CASH_1190' or '1190'), optional if transaction_id provided.
+        transaction_id: Transaction identifier (e.g., 'TXN-20260906-0220917'), optional if cashier_id provided.
+
+    Returns:
+        Structured summary of enriched POS transactions including total, discount, promo code,
+        manual override status, and any active anomaly alerts.
+    """
+    max_retries = 3
+    base_delay = 1.0
+
+    store_clean = str(store_id).strip()
+    store_formatted = (
+        f"STORE_{int(store_clean):03d}"
+        if store_clean.isdigit()
+        else (store_clean if store_clean.startswith("STORE_") else f"STORE_{store_clean}")
+    )
+
+    cashier_formatted: Optional[str] = None
+    if cashier_id:
+        c_clean = str(cashier_id).strip()
+        cashier_formatted = (
+            f"CASH_{int(c_clean):04d}"
+            if c_clean.isdigit()
+            else (c_clean if c_clean.startswith("CASH_") else f"CASH_{c_clean}")
+        )
+
+    # 1. Attempt remote declarative MCP Toolbox call
+    token = get_oidc_bearer_token(BIGTABLE_MCP_SERVICE_URL)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers["Content-Type"] = "application/json"
+
+    mcp_prefix = (
+        f"{store_formatted}#{transaction_id}"
+        if transaction_id
+        else f"{store_formatted}#TXN-%"
+    )
+
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "read_pos_transactions_enriched",
+                "arguments": {"prefix": mcp_prefix},
+            },
+        }
+        with httpx.Client(headers=headers, timeout=10.0) as client:
+            resp = client.post(f"{BIGTABLE_MCP_SERVICE_URL}/mcp", json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "result" in data and not data.get("isError"):
+                    content_list = data["result"].get("content", [])
+                    texts = [c.get("text", "") for c in content_list if c.get("type") == "text"]
+                    if texts and texts[0].strip() not in ("[]", ""):
+                        mcp_records = []
+                        for t in texts:
+                            try:
+                                r = json.loads(t)
+                                raw_key = r.get("_key", "")
+                                try:
+                                    rk = base64.b64decode(raw_key).decode("utf-8", errors="replace") if raw_key else mcp_prefix
+                                except Exception:
+                                    rk = raw_key or mcp_prefix
+                                rec: Dict[str, Any] = {"row_key": rk, "store_id": store_formatted}
+                                for k, v in r.get("tx", {}).items():
+                                    try:
+                                        dk = base64.b64decode(k).decode("utf-8", errors="replace")
+                                        dv = base64.b64decode(v).decode("utf-8", errors="replace")
+                                        if dk in ["total", "subtotal_amount", "discount", "tax_amount"]:
+                                            rec[dk] = float(dv)
+                                        elif dk in ["item_count", "total_quantity"]:
+                                            rec[dk] = int(dv)
+                                        elif dk in ["manual_discount_flag", "is_contactless"]:
+                                            rec[dk] = dv.lower() == "true"
+                                        elif dk == "items":
+                                            rec[dk] = json.loads(dv)
+                                        else:
+                                            rec[dk] = dv
+                                    except Exception:
+                                        rec[k] = v
+                                alerts_data: Dict[str, Any] = {}
+                                for k, v in r.get("alerts", {}).items():
+                                    try:
+                                        dk = base64.b64decode(k).decode("utf-8", errors="replace")
+                                        dv = base64.b64decode(v).decode("utf-8", errors="replace")
+                                        if "risk_score" in dk:
+                                            alerts_data[dk] = float(dv)
+                                        else:
+                                            alerts_data[dk] = dv
+                                    except Exception:
+                                        alerts_data[k] = v
+                                rec["anomaly_alerts"] = alerts_data
+                                if cashier_formatted:
+                                    if rec.get("cashier_id") == cashier_formatted:
+                                        mcp_records.append(rec)
+                                else:
+                                    mcp_records.append(rec)
+                            except Exception:
+                                pass
+                        if mcp_records:
+                            return _format_enriched_response(store_formatted, mcp_records)
+    except Exception as e:
+        logger.debug("Remote MCP read_pos_transactions_enriched unavailable, using local fallback: %s", e)
+
+    # 2. Local native Bigtable fallback logic
+    for attempt in range(1, max_retries + 1):
+        try:
+            from google.cloud import bigtable
+            from google.cloud.bigtable.row_set import RowSet
+            from google.cloud.bigtable.row_filters import CellsColumnLimitFilter
+
+            bt_client = bigtable.Client(project=PROJECT_ID, admin=False)
+            instance = bt_client.instance(BIGTABLE_INSTANCE_ID)
+            table = instance.table(BIGTABLE_ENRICHED_TABLE_ID)
+
+            matching_rows = []
+            if transaction_id:
+                row_key_str = f"{store_formatted}#{transaction_id}"
+                row = table.read_row(row_key_str.encode("utf-8"))
+                if row:
+                    matching_rows.append(row)
+            else:
+                prefix_str = f"{store_formatted}#"
+                row_set = RowSet()
+                row_set.add_row_range_with_prefix(prefix_str)
+                filter_ = CellsColumnLimitFilter(1)
+                scanned = table.read_rows(row_set=row_set, filter_=filter_, limit=50)
+                for r in scanned:
+                    if cashier_formatted:
+                        c_cell = r.cells.get("tx", {}).get(b"cashier_id")
+                        if c_cell and c_cell[0].value.decode("utf-8", errors="replace") != cashier_formatted:
+                            continue
+                    matching_rows.append(r)
+                    if len(matching_rows) >= 5:
+                        break
+
+            if not matching_rows:
+                target_desc = (
+                    f"transaction `{transaction_id}`"
+                    if transaction_id
+                    else (f"cashier `{cashier_formatted}`" if cashier_formatted else f"store `{store_formatted}`")
+                )
+                return (
+                    f"No enriched transaction records found in Cloud Bigtable `{BIGTABLE_ENRICHED_TABLE_ID}` "
+                    f"for {target_desc}."
+                )
+
+            parsed_records = []
+            for r in matching_rows:
+                rec: Dict[str, Any] = {
+                    "row_key": r.row_key.decode("utf-8", errors="replace"),
+                    "store_id": store_formatted,
+                }
+                tx_cells = r.cells.get("tx", {})
+                for col_bytes, val_list in tx_cells.items():
+                    col_name = col_bytes.decode("utf-8", errors="replace")
+                    raw_val = val_list[0].value.decode("utf-8", errors="replace")
+                    try:
+                        if col_name in ["total", "subtotal_amount", "discount", "tax_amount"]:
+                            rec[col_name] = float(raw_val)
+                        elif col_name in ["item_count", "total_quantity"]:
+                            rec[col_name] = int(raw_val)
+                        elif col_name in ["manual_discount_flag", "is_contactless"]:
+                            rec[col_name] = raw_val.lower() == "true"
+                        elif col_name == "items":
+                            rec[col_name] = json.loads(raw_val)
+                        else:
+                            rec[col_name] = raw_val
+                    except Exception:
+                        rec[col_name] = raw_val
+
+                alert_cells = r.cells.get("alerts", {})
+                alerts_data: Dict[str, Any] = {}
+                for col_bytes, val_list in alert_cells.items():
+                    col_name = col_bytes.decode("utf-8", errors="replace")
+                    raw_val = val_list[0].value.decode("utf-8", errors="replace")
+                    try:
+                        if "risk_score" in col_name:
+                            alerts_data[col_name] = float(raw_val)
+                        else:
+                            alerts_data[col_name] = raw_val
+                    except Exception:
+                        alerts_data[col_name] = raw_val
+                rec["anomaly_alerts"] = alerts_data
+                parsed_records.append(rec)
+
+            return _format_enriched_response(store_formatted, parsed_records)
+
+        except Exception as e:
+            logger.warning("Error querying Bigtable enriched transactions on attempt %d: %s", attempt, e)
+            if attempt < max_retries:
+                time.sleep(base_delay * (2 ** (attempt - 1)))
+
+    return (
+        f"Unable to read enriched transactions for Store {store_formatted} due to a transient "
+        f"database connectivity error. Please retry shortly."
+    )
+
+
 class BigtableMcpToolset(BaseToolset):
     """ADK Toolset providing Bigtable real-time operational alerts and declarative MCP Toolbox integration."""
 
@@ -287,7 +521,7 @@ class BigtableMcpToolset(BaseToolset):
                 logger.warning("Failed to initialize remote MCP connection: %s", e)
 
     async def get_tools(self, readonly_context: Optional[ReadonlyContext] = None) -> List[BaseTool]:
-        """Returns declarative MCP tools for querying Bigtable real-time alerts."""
+        """Returns declarative MCP tools for querying Bigtable real-time alerts and enriched transactions."""
         tools: List[BaseTool] = []
         try:
             self._init_mcp()
@@ -297,10 +531,12 @@ class BigtableMcpToolset(BaseToolset):
         except Exception as e:
             logger.debug("Remote MCP tools retrieval skipped or unavailable: %s", e)
 
-        # Add function tool if not already supplied by the remote MCP server
+        # Add function tool fallback if not already supplied by the remote MCP server
         existing_names = {t.name for t in tools}
         if "read_cashier_realtime_alerts" not in existing_names:
             tools.append(FunctionTool(func=read_cashier_realtime_alerts))
+        if "read_pos_transactions_enriched" not in existing_names:
+            tools.append(FunctionTool(func=read_pos_transactions_enriched))
 
         return tools
 
@@ -311,3 +547,11 @@ class BigtableMcpToolset(BaseToolset):
 
 # Primary toolset instance exported for ADK coordinator binding
 bigtable_mcp_toolset = BigtableMcpToolset(service_url=BIGTABLE_MCP_SERVICE_URL)
+
+__all__ = [
+    "bigtable_mcp_toolset",
+    "BigtableMcpToolset",
+    "read_cashier_realtime_alerts",
+    "read_pos_transactions_enriched",
+    "get_oidc_bearer_token",
+]

@@ -14,3 +14,13 @@ tools:
       - name: prefix
         type: string
         description: "Row key prefix pattern matching STORE_xxx#CASH_yyyy% (e.g. STORE_048#CASH_1190%)"
+
+  read_pos_transactions_enriched:
+    kind: bigtable-sql
+    source: operations-db
+    description: "Reads enriched frontline POS transactions, manual override flags, and anomaly alerts from Cloud Bigtable pos_transactions_enriched using GoogleSQL."
+    statement: "SELECT * FROM pos_transactions_enriched WHERE CAST(_key AS STRING) LIKE @prefix"
+    parameters:
+      - name: prefix
+        type: string
+        description: "Row key prefix pattern matching STORE_xxx#TXN-% (e.g. STORE_001#TXN-% or STORE_001#TXN-20260910-0000727)"

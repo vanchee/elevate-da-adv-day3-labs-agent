@@ -30,43 +30,74 @@ if not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_GENAI_USE
         except Exception:
             pass
     if not os.environ.get("GOOGLE_CLOUD_LOCATION"):
-        os.environ["GOOGLE_CLOUD_LOCATION"] = "us-central1"
+        os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 
 from app.agent import root_agent
+from app.app_utils.services import get_session_service
 
 
-def test_agent_stream() -> None:
-    """
-    Integration test for the agent stream functionality.
-    Tests that the agent returns valid streaming responses.
-    """
-
-    session_service = InMemorySessionService()
-
-    session = session_service.create_session_sync(user_id="test_user", app_name="test")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test")
+def test_agent_stream_hardware_troubleshooting() -> None:
+    """Integration test for agent streaming on POS hardware troubleshooting (ERR-PAY-4001)."""
+    session_service = get_session_service()
+    session = session_service.create_session_sync(user_id="store_manager_01", app_name="app")
+    runner = Runner(agent=root_agent, session_service=session_service, app_name="app")
 
     message = types.Content(
-        role="user", parts=[types.Part.from_text(text="Why is the sky blue?")]
+        role="user",
+        parts=[types.Part.from_text(text="How do I fix error code ERR-PAY-4001 on the POS EMV terminal reader?")],
     )
 
     events = list(
         runner.run(
             new_message=message,
-            user_id="test_user",
+            user_id="store_manager_01",
             session_id=session.id,
             run_config=RunConfig(streaming_mode=StreamingMode.SSE),
         )
     )
-    assert len(events) > 0, "Expected at least one message"
+    assert len(events) > 0, "Expected at least one streaming event"
 
-    has_text_content = False
+    all_texts = []
     for event in events:
-        if (
-            event.content
-            and event.content.parts
-            and any(part.text for part in event.content.parts)
-        ):
-            has_text_content = True
-            break
-    assert has_text_content, "Expected at least one message with text content"
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if part.text:
+                    all_texts.append(part.text)
+
+    combined_text = " ".join(all_texts)
+    assert len(combined_text) > 0, "Expected non-empty text in streaming response"
+    # Agent should provide troubleshooting steps or reference runbook
+    assert any(term in combined_text.lower() for term in ["err-pay-4001", "emv", "terminal", "reader", "pos"])
+
+
+def test_agent_stream_cashier_live_audit() -> None:
+    """Integration test for agent streaming on cashier real-time metrics and audit status."""
+    session_service = get_session_service()
+    session = session_service.create_session_sync(user_id="audit_lead_01", app_name="app")
+    runner = Runner(agent=root_agent, session_service=session_service, app_name="app")
+
+    message = types.Content(
+        role="user",
+        parts=[types.Part.from_text(text="What are the live rolling 1-hour metrics and override rate for Cashier CASH_1190 at Store 48?")],
+    )
+
+    events = list(
+        runner.run(
+            new_message=message,
+            user_id="audit_lead_01",
+            session_id=session.id,
+            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+        )
+    )
+    assert len(events) > 0, "Expected at least one streaming event"
+
+    all_texts = []
+    for event in events:
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if part.text:
+                    all_texts.append(part.text)
+
+    combined_text = " ".join(all_texts)
+    assert len(combined_text) > 0, "Expected non-empty text in streaming response"
+    assert any(term in combined_text.lower() for term in ["1190", "store", "cashier", "override", "audit", "metrics"])

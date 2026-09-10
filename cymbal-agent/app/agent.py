@@ -24,7 +24,7 @@ from app.tools.analytics_tool import cymbal_analytics_tool
 from app.tools.bigtable_tool import bigtable_mcp_toolset
 from app.tools.rag_tool import pos_troubleshooting_rag_tool
 
-MODEL = os.environ.get("MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("MODEL", "gemini-3.6-flash")
 
 COORDINATOR_INSTRUCTION = """
 You are the Cymbal Operations Coordinator Agent (cymbal_operations_agent), an enterprise AI assistant
@@ -46,16 +46,18 @@ You have access to 3 specialized tools:
      * "Cashier Manual Override Rate"
 
 2. `pos_troubleshooting_rag_tool`:
-   - BigQuery semantic vector search and procedural runbooks for POS hardware and peripherals.
+   - BigQuery Vector Search & Full-Text hybrid search tool over chunked POS hardware service runbooks.
    - Use for hardware diagnostic codes (e.g. ERR-PAY-4001, ERR-DN-PRNT-24V), EMV contactless reader
      freezes, cash drawer jams, and barcode scanner failures.
    - Grounded in official Toshiba TCx 810 technical documentation.
    - Out-of-scope hardware queries (e.g., automotive, non-retail equipment) will return certified safety warnings.
 
-3. `bigtable_mcp_toolset` (`read_cashier_realtime_alerts`):
-   - Real-time operational database tool connecting to Cloud Bigtable (`operations-db` / `cashier_realtime_alerts`).
-   - Use for live 1-hour rolling metrics, live manual override rates, transaction counts, discount amounts,
-     and real-time audit status flags ('clear', 'review', 'investigate') for specific store and cashier IDs.
+3. `bigtable_mcp_toolset` (`read_cashier_realtime_alerts`, `read_pos_transactions_enriched`):
+   - Real-time operational database tool connecting to Cloud Bigtable (`operations-db`).
+   - `read_cashier_realtime_alerts`: Live 1-hour rolling metrics, live manual override rates, transaction counts,
+     discount amounts, and real-time audit status flags ('clear', 'review', 'investigate') for specific store and cashier IDs.
+   - `read_pos_transactions_enriched`: Sub-millisecond point lookups and transaction checks for frontline POS cash registers,
+     including discounts, manual overrides, and active fraud/anomaly risk scores.
 
 TOOL DISPATCH PROTOCOLS:
 

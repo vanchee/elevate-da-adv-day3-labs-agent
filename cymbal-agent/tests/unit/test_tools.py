@@ -24,6 +24,7 @@ from app.tools.analytics_tool import cymbal_analytics_tool
 from app.tools.bigtable_tool import (
     get_oidc_bearer_token,
     read_cashier_realtime_alerts,
+    read_pos_transactions_enriched,
 )
 from app.tools.rag_tool import (
     OUT_OF_SCOPE_DECLINE_STRING,
@@ -57,8 +58,7 @@ class TestRagTool:
 
         result = pos_troubleshooting_rag_tool("How do I replace the engine oil on a Ford F-150 truck?")
         assert result == OUT_OF_SCOPE_DECLINE_STRING
-        assert "similarity score below certified threshold 0.70" in result
-        assert "This system only supports Cymbal POS terminal hardware and peripheral troubleshooting." in result
+        assert result == "I cannot find certified warranty or repair rules for this specific error in our technical repository."
 
     @patch("google.cloud.bigquery.Client")
     def test_in_scope_hardware_query_with_boosting(self, mock_bq_client):
@@ -182,3 +182,83 @@ class TestBigtableMcpTool:
 
         result = read_cashier_realtime_alerts("99", "9999")
         assert "No real-time alert records found for Cashier CASH_9999 at STORE_099" in result
+
+    @patch("httpx.Client")
+    @patch("app.tools.bigtable_tool.get_oidc_bearer_token", return_value="mock-token-123")
+    def test_read_pos_transactions_enriched_remote_mcp(self, mock_token, mock_client_cls):
+        """Verifies remote declarative MCP lookup and base64 parsing for enriched transactions."""
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+
+        b64_key = base64.b64encode(b"STORE_001#TXN-20260910-0000727").decode("utf-8")
+        b64_total_col = base64.b64encode(b"total").decode("utf-8")
+        b64_total_val = base64.b64encode(b"383.93").decode("utf-8")
+        b64_cashier_col = base64.b64encode(b"cashier_id").decode("utf-8")
+        b64_cashier_val = base64.b64encode(b"CASH_1002").decode("utf-8")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({
+                            "_key": b64_key,
+                            "tx": {
+                                b64_total_col: b64_total_val,
+                                b64_cashier_col: b64_cashier_val,
+                            },
+                            "alerts": {},
+                        }),
+                    }
+                ]
+            }
+        }
+        mock_client.post.return_value = mock_resp
+
+        result = read_pos_transactions_enriched("1", transaction_id="TXN-20260910-0000727")
+        assert "Cloud Bigtable Enriched Transactions" in result
+        assert "STORE_001" in result
+        assert "CASH_1002" in result
+        assert "$383.93" in result
+
+    @patch("httpx.Client")
+    @patch("app.tools.bigtable_tool.get_oidc_bearer_token", return_value="mock-token-123")
+    @patch("google.cloud.bigtable.Client")
+    def test_read_pos_transactions_enriched_local_fallback(
+        self, mock_bt_client_cls, mock_token, mock_http_client_cls
+    ):
+        """Verifies local native Bigtable fallback when remote MCP fails."""
+        # Force remote MCP failure
+        mock_http_client = MagicMock()
+        mock_http_client_cls.return_value.__enter__.return_value = mock_http_client
+        mock_http_client.post.side_effect = Exception("Connection refused")
+
+        # Mock Bigtable native client
+        mock_bt_client = MagicMock()
+        mock_bt_client_cls.return_value = mock_bt_client
+        mock_table = MagicMock()
+        mock_bt_client.instance.return_value.table.return_value = mock_table
+
+        mock_row = MagicMock()
+        mock_row.row_key = b"STORE_048#TXN-20260906-0220917"
+        mock_cell_cashier = MagicMock()
+        mock_cell_cashier.value = b"CASH_1190"
+        mock_cell_total = MagicMock()
+        mock_cell_total.value = b"59.38"
+
+        mock_row.cells = {
+            "tx": {
+                b"cashier_id": [mock_cell_cashier],
+                b"total": [mock_cell_total],
+            },
+            "alerts": {},
+        }
+        mock_table.read_row.return_value = mock_row
+
+        result = read_pos_transactions_enriched("48", transaction_id="TXN-20260906-0220917")
+        assert "Cloud Bigtable Enriched Transactions" in result
+        assert "STORE_048" in result
+        assert "CASH_1190" in result
+        assert "$59.38" in result

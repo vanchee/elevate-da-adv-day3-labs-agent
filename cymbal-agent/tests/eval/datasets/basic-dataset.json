@@ -1,29 +1,128 @@
 {
   "eval_cases": [
     {
-      "eval_case_id": "greeting",
+      "eval_case_id": "emv_contactless_freeze",
       "prompt": {
         "role": "user",
-        "parts": [{"text": "Hello, what can you help me with?"}]
-      }
-    },
-    {
-      "eval_case_id": "weather_query",
-      "prompt": {
-        "role": "user",
-        "parts": [{"text": "What's the weather like in San Francisco?"}]
-      }
-    },
-    {
-      "eval_case_id": "capital_lookup",
-      "prompt": {
-        "role": "user",
-        "parts": [{"text": "What is the capital of France?"}]
+        "parts": [
+          {
+            "text": "How do I troubleshoot an EMV contactless reader freeze displaying error code ERR-PAY-4001 on the POS terminal?"
+          }
+        ]
       },
       "reference": {
         "response": {
           "role": "model",
-          "parts": [{"text": "The capital of France is Paris."}]
+          "parts": [
+            {
+              "text": "For error code ERR-PAY-4001 on the Toshiba TCx 810 POS terminal: 1. Power cycle the contactless reader and reseat the USB interface cable. 2. Clear terminal offline transaction buffer and restart the POS payment daemon. 3. Refer to certified documentation: [POS_Manual_v2.pdf](https://storage.cloud.google.com/pvelevate-project-cymbal-retail-docs/manuals/POS_Manual_v2.pdf)."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "cashier_live_alerts_audit",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "What are the live rolling 1-hour metrics, override rate, and audit status for Cashier CASH_1190 at Store 48?"
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Retrieved real-time metrics for Cashier CASH_1190 at STORE_048 from Cloud Bigtable cashier_realtime_alerts: Live 1-hour manual override rate, transaction count, discount amount, and audit status flag."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "dual_cashier_baseline_comparison",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Compare the live 1-hour manual override rate for Cashier CASH_1190 at Store 48 against their 7-day historical baseline."
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Comparison of Cashier CASH_1190 at Store 48: Live 1-Hour Manual Override Rate from Bigtable compared against the 7-day historical Cashier Manual Override Rate baseline from BigQuery enterprise analytics."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "inventory_stockout_cover_hours",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Which product categories at Store 48 have an Estimated Cover Hours under 20 hours and face imminent stockout risk?"
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Analytical review of gold_inventory_reconciliation_ledger at Store 48 identifying product categories with Estimated Cover Hours below 20 hours and critical Total On-Hand Inventory stockout risks."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "rag_out_of_scope_guardrail",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Can you provide the certified repair manual and torque specifications for a Caterpillar diesel engine generator?"
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "I cannot find certified warranty or repair rules for this specific error in our technical repository."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "cross_cloud_promo_abuse_audit",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Identify the cashier with the highest number of active cashier promo abuse alerts in the last 7 days and audit their cross-cloud checkout transactions."
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Audit identified the top cashier with active cashier_promo_abuse alerts in pos_anomaly_alerts, followed by an audit of their federated AWS S3 silver checkout transaction log."
+            }
+          ]
         }
       }
     }

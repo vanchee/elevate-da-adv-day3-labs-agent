@@ -67,7 +67,7 @@ def cymbal_analytics_tool(query: str) -> str:
     base_delay = 1.0
 
     creds, _ = google.auth.default()
-    settings = DataAgentToolConfig(location="global")
+    settings = DataAgentToolConfig()
 
     for attempt in range(1, max_retries + 1):
         try:
