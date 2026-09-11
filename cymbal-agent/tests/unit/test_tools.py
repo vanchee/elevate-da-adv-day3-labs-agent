@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from google.adk.tools.function_tool import FunctionTool
 
+from app.auth import DelegationError, resolve_credentials
 from app.tools.analytics_tool import cymbal_analytics_tool
 from app.tools.bigtable_tool import (
     _decode_family,
@@ -38,6 +39,25 @@ from app.tools.rag_tool import (
     _stitch,
     pos_troubleshooting_rag_tool,
 )
+from app.tools.store_resolution_tool import (
+    _normalise_store_id,
+    resolve_store_identifier,
+)
+
+
+class _FakeToolContext:
+    """A minimal stand-in for ADK's ToolContext.
+
+    Deliberately not a MagicMock: `state.get(...)` on a mock returns a truthy mock, which
+    `app.auth` would mistake for a real OAuth access token.
+    """
+
+    def __init__(self, state: dict):
+        self.state = state
+
+
+def _tool_context(**state) -> _FakeToolContext:
+    return _FakeToolContext(dict(state))
 
 
 def _b64(value: bytes) -> str:
@@ -58,6 +78,16 @@ def _vector_row(**overrides):
     row.context_chunks = overrides.get(
         "context_chunks", [{"idx": 13, "content": "Step 1: Check EMV reader power."}]
     )
+    return row
+
+
+def _store_row(store_id: str, store_name: str, city: str, similarity: float):
+    """Builds a mock store directory VECTOR_SEARCH result row."""
+    row = MagicMock()
+    row.store_id = store_id
+    row.store_name = store_name
+    row.city = city
+    row.similarity_score = similarity
     return row
 
 
@@ -99,7 +129,7 @@ class TestRagTool:
         mock_query.return_value = []  # no vector hits, no full-text hits
 
         result = await pos_troubleshooting_rag_tool(
-            "How do I replace the engine oil on a Ford F-150 truck?"
+            "How do I replace the engine oil on a Ford F-150 truck?", _tool_context()
         )
 
         assert result == OUT_OF_SCOPE_DECLINE_STRING
@@ -119,7 +149,7 @@ class TestRagTool:
         ]
 
         result = await pos_troubleshooting_rag_tool(
-            "Field recovery protocol for an ERR-PAY-4001 freeze?"
+            "Field recovery protocol for an ERR-PAY-4001 freeze?", _tool_context()
         )
 
         assert "Toshiba TCx 810" in result
@@ -144,7 +174,7 @@ class TestRagTool:
             _vector_row(similarity_score=0.6920, exact_error_match=True, rank_score=0.8920)
         ]
 
-        result = await pos_troubleshooting_rag_tool("ERR-PAY-4001 EMV freeze")
+        result = await pos_troubleshooting_rag_tool("ERR-PAY-4001 EMV freeze", _tool_context())
 
         assert "0.6920" in result, "must report the true cosine similarity"
         assert "0.8920" not in result, "must not report the lexically boosted rank score"
@@ -164,7 +194,7 @@ class TestRagTool:
 
         mock_query.side_effect = [[weak], [fallback]]
 
-        result = await pos_troubleshooting_rag_tool("the paper feed feels stiff")
+        result = await pos_troubleshooting_rag_tool("the paper feed feels stiff", _tool_context())
 
         assert mock_query.call_count == 2, "expected the full-text fallback query to run"
         assert "Full-Text Search Fallback" in result
@@ -177,7 +207,7 @@ class TestRagTool:
     async def test_cost_guardrail_applied_to_every_query(self, mock_query):
         mock_query.return_value = []
 
-        await pos_troubleshooting_rag_tool("ERR-PAY-4001")
+        await pos_troubleshooting_rag_tool("ERR-PAY-4001", _tool_context())
 
         for call in mock_query.call_args_list:
             assert call[0][1].maximum_bytes_billed > 0
@@ -369,3 +399,125 @@ class TestBigtableMcpTool:
         assert "Matched Records:** 1" in result
         assert "CASH_1190" in result
         assert "CASH_2000" not in result
+
+
+class TestCredentialDelegation:
+    """Unit tests for end-user OAuth delegation (Part 5 bonus 1)."""
+
+    def test_falls_back_to_service_identity_when_no_token(self):
+        resolved = resolve_credentials(_tool_context())
+
+        assert resolved.is_end_user is False
+        assert "service identity" in resolved.principal
+
+    def test_uses_end_user_token_when_present(self):
+        resolved = resolve_credentials(_tool_context(user_access_token="delegated-test-token"))
+
+        assert resolved.is_end_user is True
+        assert resolved.credentials.token == "delegated-test-token"
+        assert "end user" in resolved.principal
+
+    def test_mock_state_is_not_mistaken_for_a_token(self):
+        """Regression: a MagicMock state returns truthy for any key.
+
+        If that were accepted as an access token, every test -- and any host that passed
+        an unusual context object -- would silently build unusable credentials instead of
+        falling back to the service identity.
+        """
+        resolved = resolve_credentials(MagicMock())
+
+        assert resolved.is_end_user is False
+
+    def test_fails_closed_when_delegation_is_mandatory(self):
+        """With REQUIRE_END_USER_AUTH set, a missing token must raise, not over-grant."""
+        with patch("app.config.REQUIRE_END_USER_AUTH", True):
+            with pytest.raises(DelegationError):
+                resolve_credentials(_tool_context())
+
+    @pytest.mark.asyncio
+    @patch("app.tools.rag_tool._run_query")
+    async def test_rag_tool_passes_acting_identity_to_bigquery(self, mock_query):
+        """The resolved identity must reach the query layer, or delegation is cosmetic."""
+        mock_query.return_value = []
+
+        await pos_troubleshooting_rag_tool(
+            "ERR-PAY-4001", _tool_context(user_access_token="delegated-test-token")
+        )
+
+        resolved = mock_query.call_args[0][2]
+        assert resolved.is_end_user is True
+        assert resolved.credentials.token == "delegated-test-token"
+
+
+class TestStoreResolutionTool:
+    """Unit tests for semantic store entity resolution (Part 5 bonus 3)."""
+
+    def test_normalise_store_id(self):
+        assert _normalise_store_id("STORE_007") == "STORE_007"
+        assert _normalise_store_id("store 7") == "STORE_007"
+        assert _normalise_store_id("store-13") == "STORE_013"
+        assert _normalise_store_id("the Ginza store") is None
+
+    @pytest.mark.asyncio
+    @patch("app.tools.store_resolution_tool.bq.run_query")
+    async def test_confident_match_returns_store_id(self, mock_query):
+        mock_query.return_value = [
+            _store_row("STORE_007", "Cymbal Paris Champs-Elysees Flagship", "Paris", 0.6919),
+            _store_row("STORE_006", "Cymbal London Covent Garden Megastore", "London", 0.5100),
+        ]
+
+        result = await resolve_store_identifier("our Paris flagship", _tool_context())
+
+        assert "STORE_007" in result
+        assert "0.6919" in result
+        assert "STORE_006" not in result
+
+    @pytest.mark.asyncio
+    @patch("app.tools.store_resolution_tool.bq.run_query")
+    async def test_duplicate_names_are_flagged_not_guessed(self, mock_query):
+        """STORE_001 and STORE_013 share a name; picking one would answer about the wrong store."""
+        mock_query.return_value = [
+            _store_row("STORE_001", "Cymbal Tokyo Ginza District Flagship", "Tokyo", 0.6955),
+            _store_row("STORE_013", "Cymbal Tokyo Ginza District Flagship", "Tokyo", 0.6915),
+        ]
+
+        result = await resolve_store_identifier("the Ginza store", _tool_context())
+
+        assert "ambiguous" in result.lower()
+        assert "STORE_001" in result and "STORE_013" in result
+        assert "Resolved store_id" not in result
+
+    @pytest.mark.asyncio
+    @patch("app.tools.store_resolution_tool.bq.run_query")
+    async def test_weak_match_is_refused(self, mock_query):
+        mock_query.return_value = [
+            _store_row("STORE_014", "Cymbal Seoul Gangnam COEX Center", "Seoul", 0.3842)
+        ]
+
+        result = await resolve_store_identifier("the moon base", _tool_context())
+
+        assert "not matched" in result.lower() or "no store matched" in result.lower()
+        assert "Resolved store_id" not in result
+
+    @pytest.mark.asyncio
+    @patch("app.tools.store_resolution_tool.bq.run_query")
+    async def test_explicit_id_skips_vector_search(self, mock_query):
+        mock_query.return_value = [
+            _store_row("STORE_007", "Cymbal Paris Champs-Elysees Flagship", "Paris", 1.0)
+        ]
+
+        result = await resolve_store_identifier("STORE_007", _tool_context())
+
+        assert "STORE_007" in result
+        assert "exact store_id" in result
+        # An exact ID is a lookup, not a retrieval: no embedding call should be made.
+        assert "VECTOR_SEARCH" not in mock_query.call_args[0][0]
+
+    @pytest.mark.asyncio
+    @patch("app.tools.store_resolution_tool.bq.run_query")
+    async def test_cost_guardrail_applied(self, mock_query):
+        mock_query.return_value = []
+
+        await resolve_store_identifier("the Ginza store", _tool_context())
+
+        assert mock_query.call_args[0][1].maximum_bytes_billed > 0

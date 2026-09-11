@@ -110,6 +110,24 @@ RAG_TOP_K = int(os.environ.get("RAG_TOP_K", "3"))
 # Cost guardrail: cap the bytes any single tool-issued query may bill.
 MAX_BYTES_BILLED = int(os.environ.get("MAX_BYTES_BILLED", str(1_000_000_000)))
 
+# The Data Agent executes its generated SQL server-side, so `maximum_bytes_billed`
+# cannot be applied from the client. Capping returned rows limits the payload that
+# re-enters the model context on every subsequent turn; a BigQuery custom quota is the
+# complementary control on bytes scanned (see sql/README.md).
+DATA_AGENT_MAX_RESULT_ROWS = int(os.environ.get("DATA_AGENT_MAX_RESULT_ROWS", "50"))
+
+# End-user credential delegation (Part 5 bonus 1).
+# Session-state key the hosting application writes the end user's OAuth token to.
+END_USER_TOKEN_STATE_KEY = os.environ.get("END_USER_TOKEN_STATE_KEY", "user_access_token")
+# When true, tools refuse to fall back to the agent service identity (fail closed).
+REQUIRE_END_USER_AUTH = os.environ.get("REQUIRE_END_USER_AUTH", "false").lower() == "true"
+
+# Semantic store entity resolution (Part 5 bonus 3).
+STORE_DIRECTORY_TABLE_NAME = os.environ.get(
+    "STORE_DIRECTORY_TABLE_NAME", "store_directory_embeddings"
+)
+STORE_MATCH_THRESHOLD = float(os.environ.get("STORE_MATCH_THRESHOLD", "0.55"))
+
 # Transient fault tolerance shared by all tools.
 MAX_RETRIES = int(os.environ.get("TOOL_MAX_RETRIES", "3"))
 RETRY_BASE_DELAY_SECONDS = float(os.environ.get("TOOL_RETRY_BASE_DELAY", "1.0"))
@@ -118,3 +136,8 @@ RETRY_BASE_DELAY_SECONDS = float(os.environ.get("TOOL_RETRY_BASE_DELAY", "1.0"))
 def get_pos_chunk_table_id() -> str:
     """Returns the fully-qualified POS manual chunk embeddings table."""
     return f"{get_project_id()}.{GOLD_DATASET_ID}.{POS_CHUNK_TABLE_NAME}"
+
+
+def get_store_directory_table_id() -> str:
+    """Returns the fully-qualified store name/ID embedding table."""
+    return f"{get_project_id()}.{GOLD_DATASET_ID}.{STORE_DIRECTORY_TABLE_NAME}"

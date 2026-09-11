@@ -19,26 +19,16 @@ import json
 import logging
 from typing import Any, Optional
 
-import google.auth
 from google.adk.tools.data_agent.config import DataAgentToolConfig
 from google.adk.tools.data_agent.data_agent_tool import ask_data_agent
 from google.adk.tools.tool_context import ToolContext
 
 from app import config
+from app.auth import DelegationError, resolve_credentials
 
 logger = logging.getLogger(__name__)
 
 MAX_TABLE_ROWS = 20
-
-_credentials = None
-
-
-def _get_credentials():
-    """Returns cached Application Default Credentials."""
-    global _credentials
-    if _credentials is None:
-        _credentials, _ = google.auth.default()
-    return _credentials
 
 
 def _render_response(result: dict[str, Any]) -> Optional[str]:
@@ -101,7 +91,21 @@ async def cymbal_analytics_tool(query: str, tool_context: ToolContext) -> str:
         or a formatted JSON error payload contract under persistent failure.
     """
     data_agent_resource = config.get_data_agent_resource()
-    settings = DataAgentToolConfig()
+
+    # Resolve the acting principal. With end-user delegation enabled, the Data Agent's
+    # generated SQL executes under the caller's own BigQuery permissions, so row-level
+    # security applies to the model's queries automatically.
+    try:
+        resolved = resolve_credentials(tool_context)
+    except DelegationError as e:
+        return json.dumps({"status": "ERROR", "error": str(e), "data": None})
+
+    # max_query_result_rows bounds the payload that re-enters the model context on every
+    # subsequent turn. Bytes scanned is governed separately by a BigQuery custom quota,
+    # because the Data Agent runs its SQL server-side.
+    settings = DataAgentToolConfig(
+        max_query_result_rows=config.DATA_AGENT_MAX_RESULT_ROWS,
+    )
 
     def _blocking_ask() -> dict[str, Any]:
         # The Data Agent SDK call is synchronous; run it off the event loop so a
@@ -109,7 +113,7 @@ async def cymbal_analytics_tool(query: str, tool_context: ToolContext) -> str:
         return ask_data_agent(
             data_agent_name=data_agent_resource,
             query=query,
-            credentials=_get_credentials(),
+            credentials=resolved.credentials,
             settings=settings,
             tool_context=tool_context,
         )
@@ -117,13 +121,19 @@ async def cymbal_analytics_tool(query: str, tool_context: ToolContext) -> str:
     for attempt in range(1, config.MAX_RETRIES + 1):
         try:
             logger.info(
-                "Calling BigQuery Conversational Data Agent (attempt %d): %s", attempt, query
+                "Calling BigQuery Conversational Data Agent (attempt %d) as %s: %s",
+                attempt, resolved.principal, query,
             )
             result = await asyncio.to_thread(_blocking_ask)
 
             if result.get("status") == "SUCCESS":
                 rendered = _render_response(result)
                 if rendered:
+                    if resolved.is_end_user:
+                        rendered += (
+                            "\n\n*Access scope: results reflect the signed-in user's own "
+                            "BigQuery permissions.*"
+                        )
                     return rendered
                 return "Query executed successfully, but no response text was returned."
 

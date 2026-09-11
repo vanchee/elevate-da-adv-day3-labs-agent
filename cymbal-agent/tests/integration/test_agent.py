@@ -177,3 +177,45 @@ def test_agent_sequential_dispatch_cross_cloud_audit() -> None:
     assert all("cymbal_analytics_tool" in g for g in groups[:2]), (
         f"Expected both audit turns to query the analytics layer, got: {groups}"
     )
+
+
+def test_agent_resolves_store_name_before_querying() -> None:
+    """Part 5 protocol D: an informal store name must be resolved to an ID first."""
+    events = _run(
+        "How much total on-hand inventory is at our Paris flagship store?",
+        "store_manager_03",
+    )
+
+    calls = _tool_calls(events)
+    assert "resolve_store_identifier" in calls, (
+        f"Expected the store name to be resolved before querying; saw {calls}"
+    )
+    # Resolution must precede analytics, otherwise the analytics call guessed an ID.
+    if "cymbal_analytics_tool" in calls:
+        assert calls.index("resolve_store_identifier") < calls.index("cymbal_analytics_tool")
+
+    assert "STORE_007" in _text(events)
+
+
+@pytest.mark.slow
+def test_agent_refuses_to_guess_between_identically_named_stores() -> None:
+    """STORE_001 and STORE_013 share a name; the agent must ask, not pick.
+
+    This is the failure mode that matters: guessing does not surface as an error, it
+    surfaces as a confident answer about the wrong store.
+    """
+    events = _run(
+        "What is the total on-hand inventory at the Ginza store?",
+        "store_manager_04",
+    )
+
+    calls = _tool_calls(events)
+    assert "resolve_store_identifier" in calls, f"Store resolution not attempted; saw {calls}"
+    assert "cymbal_analytics_tool" not in calls, (
+        f"Agent queried analytics despite an ambiguous store reference; saw {calls}"
+    )
+
+    combined = _text(events)
+    assert "STORE_001" in combined and "STORE_013" in combined, (
+        f"Expected both ambiguous store IDs to be surfaced, got: {combined[:400]}"
+    )

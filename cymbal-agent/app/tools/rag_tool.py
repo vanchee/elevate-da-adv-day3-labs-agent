@@ -19,9 +19,10 @@ import logging
 import re
 from typing import Any, Optional
 
-from google.cloud import bigquery
+from google.adk.tools.tool_context import ToolContext
 
-from app import config
+from app import bq, config
+from app.auth import DelegationError, ResolvedCredentials, resolve_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +36,11 @@ OUT_OF_SCOPE_DECLINE_STRING = (
 
 _ERROR_CODE_PATTERN = re.compile(r"[A-Z]{3,}-[A-Z0-9\-]+")
 
-_client: Optional[bigquery.Client] = None
-
-
-def _get_client() -> bigquery.Client:
-    """Returns a lazily-created, module-level BigQuery client.
-
-    Reusing one client avoids re-doing ADC discovery and the TLS handshake on every
-    tool call.
-    """
-    global _client
-    if _client is None:
-        _client = bigquery.Client(project=config.get_project_id())
-    return _client
+# The per-identity client cache and the byte-capped job config live in `app.bq` so every
+# query-issuing tool inherits the same guardrails. They are aliased here because tests
+# patch them on this module.
+_get_client = bq.get_client
+_run_query = bq.run_query
 
 
 def _format_gcs_link(uri: Optional[str]) -> str:
@@ -65,23 +58,7 @@ def _extract_error_code(query: str) -> str:
     return matches[0] if matches else ""
 
 
-def _job_config(**params: Any) -> bigquery.QueryJobConfig:
-    """Builds a parameterised job config with the shared cost guardrail applied."""
-    return bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter(name, "STRING", value)
-            for name, value in params.items()
-        ],
-        maximum_bytes_billed=config.MAX_BYTES_BILLED,
-    )
-
-
-async def _run_query(sql: str, job_config: bigquery.QueryJobConfig) -> list:
-    """Runs a BigQuery query off the event loop so concurrent tool calls stay parallel."""
-    def _blocking() -> list:
-        return list(_get_client().query(sql, job_config=job_config).result())
-
-    return await asyncio.to_thread(_blocking)
+_job_config = bq.string_job_config
 
 
 def _stitch(chunks: list[tuple[int, str]]) -> str:
@@ -121,7 +98,7 @@ def _format_hit(row: Any, stitched: str, exact_match: bool) -> str:
     )
 
 
-async def pos_troubleshooting_rag_tool(query: str) -> str:
+async def pos_troubleshooting_rag_tool(query: str, tool_context: ToolContext) -> str:
     """Performs semantic vector search over POS terminal runbooks and manuals in BigQuery.
 
     Use this tool to resolve POS terminal hardware error codes (such as ERR-PAY-4001,
@@ -136,6 +113,11 @@ async def pos_troubleshooting_rag_tool(query: str) -> str:
     """
     error_code = _extract_error_code(query)
     chunk_table = config.get_pos_chunk_table_id()
+
+    try:
+        resolved = resolve_credentials(tool_context)
+    except DelegationError as e:
+        return str(e)
 
     # `similarity_score` is the true cosine similarity and is the ONLY value gated
     # against the safety threshold or shown to the user. `rank_score` adds a lexical
@@ -194,7 +176,7 @@ async def pos_troubleshooting_rag_tool(query: str) -> str:
                 attempt, query, error_code or "n/a",
             )
             rows = await _run_query(
-                vector_sql, _job_config(query_text=query, error_code=error_code)
+                vector_sql, _job_config(query_text=query, error_code=error_code), resolved
             )
 
             # A chunk is certified if it clears the cosine threshold OR literally
@@ -227,7 +209,7 @@ async def pos_troubleshooting_rag_tool(query: str) -> str:
                 "No chunk met the %.2f cosine threshold; falling back to full-text SEARCH()",
                 config.SIMILARITY_THRESHOLD,
             )
-            return await _full_text_fallback(query, error_code, chunk_table)
+            return await _full_text_fallback(query, error_code, chunk_table, resolved)
 
         except Exception as e:
             last_error = e
@@ -242,7 +224,9 @@ async def pos_troubleshooting_rag_tool(query: str) -> str:
     )
 
 
-async def _full_text_fallback(query: str, error_code: str, chunk_table: str) -> str:
+async def _full_text_fallback(
+    query: str, error_code: str, chunk_table: str, resolved: ResolvedCredentials
+) -> str:
     """Keyword fallback used when no chunk clears the cosine similarity threshold."""
     if error_code:
         search_term = f"`{error_code}`"
@@ -267,7 +251,7 @@ async def _full_text_fallback(query: str, error_code: str, chunk_table: str) -> 
     """
 
     rows = await _run_query(
-        fallback_sql, _job_config(search_term=search_term, error_code=error_code)
+        fallback_sql, _job_config(search_term=search_term, error_code=error_code), resolved
     )
     if not rows:
         return OUT_OF_SCOPE_DECLINE_STRING
