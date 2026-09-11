@@ -20,17 +20,45 @@ import struct
 from unittest.mock import MagicMock, patch
 
 import pytest
+from google.adk.tools.function_tool import FunctionTool
+
 from app.tools.analytics_tool import cymbal_analytics_tool
 from app.tools.bigtable_tool import (
-    get_oidc_bearer_token,
+    _decode_family,
+    _normalise_cashier,
+    _normalise_store,
+    bigtable_mcp_toolset,
     read_cashier_realtime_alerts,
     read_pos_transactions_enriched,
 )
 from app.tools.rag_tool import (
     OUT_OF_SCOPE_DECLINE_STRING,
+    _extract_error_code,
     _format_gcs_link,
+    _stitch,
     pos_troubleshooting_rag_tool,
 )
+
+
+def _b64(value: bytes) -> str:
+    return base64.b64encode(value).decode("utf-8")
+
+
+def _vector_row(**overrides):
+    """Builds a mock VECTOR_SEARCH result row."""
+    row = MagicMock()
+    row.document_filename = overrides.get("document_filename", "Toshiba_TCx_810_Guide")
+    row.document_title = overrides.get("document_title", "Toshiba TCx 810 POS Hardware Guide")
+    row.equipment_covered = overrides.get("equipment_covered", "Toshiba TCx 810")
+    row.source_pdf_uri = overrides.get("source_pdf_uri", "gs://cymbal-bucket/toshiba_tcx810.pdf")
+    row.center_chunk_index = overrides.get("center_chunk_index", 13)
+    row.similarity_score = overrides.get("similarity_score", 0.8800)
+    row.exact_error_match = overrides.get("exact_error_match", False)
+    row.rank_score = overrides.get("rank_score", row.similarity_score)
+    row.context_chunks = overrides.get(
+        "context_chunks", [{"idx": 13, "content": "Step 1: Check EMV reader power."}]
+    )
+    return row
 
 
 class TestRagTool:
@@ -48,54 +76,119 @@ class TestRagTool:
             == "https://storage.cloud.google.com/doc.pdf"
         )
 
-    @patch("google.cloud.bigquery.Client")
-    def test_out_of_scope_returns_exact_decline_string(self, mock_bq_client):
-        """Verifies that an out-of-scope inquiry returns the mandatory certified decline string."""
-        mock_instance = MagicMock()
-        mock_bq_client.return_value = mock_instance
-        # Both vector query and fallback text query return empty
-        mock_instance.query.return_value.result.return_value = []
+    def test_extract_error_code(self):
+        assert _extract_error_code("cashier hit ERR-PAY-4001 at lane 3") == "ERR-PAY-4001"
+        assert _extract_error_code("ERR-DN-PRNT-24V cutter lock") == "ERR-DN-PRNT-24V"
+        assert _extract_error_code("the printer is jammed") == ""
 
-        result = pos_troubleshooting_rag_tool("How do I replace the engine oil on a Ford F-150 truck?")
-        assert result == OUT_OF_SCOPE_DECLINE_STRING
-        assert result == "I cannot find certified warranty or repair rules for this specific error in our technical repository."
+    def test_stitch_removes_sliding_window_overlap(self):
+        """Adjacent chunks repeat 100 chars; the stitch must not emit them twice."""
+        overlap = "X" * 100
+        first = "A" * 400 + overlap
+        second = overlap + "B" * 400
 
-    @patch("google.cloud.bigquery.Client")
-    def test_in_scope_hardware_query_with_boosting(self, mock_bq_client):
-        """Verifies that in-scope error code query retrieves certified runbook with boosted score."""
-        mock_instance = MagicMock()
-        mock_bq_client.return_value = mock_instance
+        stitched = _stitch([(4, first), (5, second)])
 
-        mock_row = MagicMock()
-        mock_row.document_filename = "Toshiba_TCx_810_Guide"
-        mock_row.document_title = "Toshiba TCx 810 POS Hardware Guide"
-        mock_row.equipment_covered = "Toshiba TCx 810"
-        mock_row.source_pdf_uri = "gs://cymbal-bucket/toshiba_tcx810.pdf"
-        mock_row.similarity_score = 0.8800
-        mock_row.stitched_content = "Step 1: Check EMV reader power. Step 2: Clear cache."
+        assert stitched == ("A" * 400 + overlap + "B" * 400)
+        assert stitched.count(overlap) == 1
 
-        mock_instance.query.return_value.result.return_value = [mock_row]
+    @pytest.mark.asyncio
+    @patch("app.tools.rag_tool._run_query")
+    async def test_out_of_scope_returns_exact_decline_string(self, mock_query):
+        """An out-of-scope inquiry must return the mandatory certified decline string."""
+        mock_query.return_value = []  # no vector hits, no full-text hits
 
-        result = pos_troubleshooting_rag_tool(
-            "What is the immediate field recovery protocol when a cashier encounters an ERR-PAY-4001 freeze?"
+        result = await pos_troubleshooting_rag_tool(
+            "How do I replace the engine oil on a Ford F-150 truck?"
         )
+
+        assert result == OUT_OF_SCOPE_DECLINE_STRING
+
+    @pytest.mark.asyncio
+    @patch("app.tools.rag_tool._run_query")
+    async def test_in_scope_hardware_query_returns_certified_runbook(self, mock_query):
+        mock_query.return_value = [
+            _vector_row(
+                similarity_score=0.8800,
+                exact_error_match=True,
+                context_chunks=[
+                    {"idx": 12, "content": "Preceding step."},
+                    {"idx": 13, "content": "Step 1: Check EMV reader power."},
+                ],
+            )
+        ]
+
+        result = await pos_troubleshooting_rag_tool(
+            "Field recovery protocol for an ERR-PAY-4001 freeze?"
+        )
+
         assert "Toshiba TCx 810" in result
         assert "0.8800" in result
         assert "https://storage.cloud.google.com/cymbal-bucket/toshiba_tcx810.pdf" in result
         assert "Step 1: Check EMV reader power" in result
 
-        # Verify error_code was extracted and passed to query parameters
-        call_kwargs = mock_instance.query.call_args[1]
-        job_config = call_kwargs["job_config"]
-        param_dict = {p.name: p.value for p in job_config.query_parameters}
-        assert param_dict.get("error_code") == "ERR-PAY-4001"
+        # The error code must reach BigQuery as a bound parameter.
+        job_config = mock_query.call_args[0][1]
+        params = {p.name: p.value for p in job_config.query_parameters}
+        assert params["error_code"] == "ERR-PAY-4001"
+
+    @pytest.mark.asyncio
+    @patch("app.tools.rag_tool._run_query")
+    async def test_reported_score_is_true_cosine_not_boosted(self, mock_query):
+        """Regression: the lexical boost must never inflate the score shown to the user.
+
+        A chunk containing the exact error code is admitted even below the 0.70 gate,
+        but the number reported must remain the raw cosine similarity.
+        """
+        mock_query.return_value = [
+            _vector_row(similarity_score=0.6920, exact_error_match=True, rank_score=0.8920)
+        ]
+
+        result = await pos_troubleshooting_rag_tool("ERR-PAY-4001 EMV freeze")
+
+        assert "0.6920" in result, "must report the true cosine similarity"
+        assert "0.8920" not in result, "must not report the lexically boosted rank score"
+        assert "exact error-code match" in result
+
+    @pytest.mark.asyncio
+    @patch("app.tools.rag_tool._run_query")
+    async def test_below_threshold_without_error_code_falls_back_to_full_text(self, mock_query):
+        """A weak semantic match with no error code must go through SEARCH(), not pass the gate."""
+        weak = _vector_row(similarity_score=0.4100, exact_error_match=False)
+        fallback = MagicMock()
+        fallback.document_filename = "Clover_Station_Solo_Guide"
+        fallback.document_title = "Clover Station Solo Guide"
+        fallback.equipment_covered = "Clover Station Solo"
+        fallback.source_pdf_uri = "gs://cymbal-bucket/clover.pdf"
+        fallback.chunk_content = "Reseat the receipt spindle."
+
+        mock_query.side_effect = [[weak], [fallback]]
+
+        result = await pos_troubleshooting_rag_tool("the paper feed feels stiff")
+
+        assert mock_query.call_count == 2, "expected the full-text fallback query to run"
+        assert "Full-Text Search Fallback" in result
+        assert "Reseat the receipt spindle" in result
+        # No fabricated numeric relevance score for a keyword match.
+        assert "Relevance Score" not in result
+
+    @pytest.mark.asyncio
+    @patch("app.tools.rag_tool._run_query")
+    async def test_cost_guardrail_applied_to_every_query(self, mock_query):
+        mock_query.return_value = []
+
+        await pos_troubleshooting_rag_tool("ERR-PAY-4001")
+
+        for call in mock_query.call_args_list:
+            assert call[0][1].maximum_bytes_billed > 0
 
 
 class TestAnalyticsTool:
     """Unit tests for Cymbal Conversational Analytics tool."""
 
+    @pytest.mark.asyncio
     @patch("app.tools.analytics_tool.ask_data_agent")
-    def test_analytics_success_response(self, mock_ask):
+    async def test_analytics_success_response(self, mock_ask):
         mock_ask.return_value = {
             "status": "SUCCESS",
             "response": [
@@ -108,157 +201,171 @@ class TestAnalyticsTool:
             ],
         }
 
-        result = cymbal_analytics_tool("What is the total on-hand inventory for stockout risks < 20 hours?")
+        result = await cymbal_analytics_tool(
+            "What is the total on-hand inventory for stockout risks < 20 hours?",
+            MagicMock(),
+        )
         assert "4,120 units" in result
 
+    @pytest.mark.asyncio
     @patch("app.tools.analytics_tool.ask_data_agent")
-    def test_analytics_persistent_failure_contract(self, mock_ask):
-        """Verifies that persistent failure returns the specified JSON payload contract."""
+    async def test_business_glossary_terms_passed_verbatim(self, mock_ask):
+        """Standardised enterprise terms must reach the Data Agent unmodified."""
+        mock_ask.return_value = {
+            "status": "SUCCESS",
+            "response": [{"text": {"textType": "FINAL_RESPONSE", "parts": ["ok"]}}],
+        }
+        query = (
+            "Compare Net Transaction Revenue against Total On-Hand Inventory and the "
+            "Cashier Manual Override Rate where Estimated Cover Hours < 20."
+        )
+
+        await cymbal_analytics_tool(query, MagicMock())
+
+        assert mock_ask.call_args.kwargs["query"] == query
+
+    @pytest.mark.asyncio
+    @patch("app.tools.analytics_tool.ask_data_agent")
+    async def test_analytics_persistent_failure_contract(self, mock_ask):
+        """Persistent failure must return the specified JSON payload contract."""
         mock_ask.side_effect = Exception("Service unavailable")
 
-        result = cymbal_analytics_tool("What is the Net Transaction Revenue?")
+        result = await cymbal_analytics_tool("What is the Net Transaction Revenue?", MagicMock())
+
         parsed = json.loads(result)
-        assert parsed.get("status") == "ERROR"
-        assert "Store analytics data is currently unreachable" in parsed.get("error", "")
-        assert parsed.get("data") is None
+        assert parsed["status"] == "ERROR"
+        assert "Store analytics data is currently unreachable" in parsed["error"]
+        assert parsed["data"] is None
 
 
 class TestBigtableMcpTool:
-    """Unit tests for Bigtable MCP toolset and realtime alerts query."""
+    """Unit tests for the Bigtable MCP toolset and its cell decoding."""
 
-    @patch("httpx.Client")
-    @patch("app.tools.bigtable_tool.get_oidc_bearer_token", return_value="mock-token-123")
-    def test_read_cashier_realtime_alerts_success(self, mock_token, mock_client_cls):
-        mock_client = MagicMock()
-        mock_client_cls.return_value.__enter__.return_value = mock_client
+    def test_row_key_normalisation(self):
+        assert _normalise_store("48") == "STORE_048"
+        assert _normalise_store("048") == "STORE_048"
+        assert _normalise_store("STORE_048") == "STORE_048"
+        assert _normalise_cashier("1190") == "CASH_1190"
+        assert _normalise_cashier("CASH_1190") == "CASH_1190"
 
-        # Construct simulated base64 Bigtable row from MCP service
-        b64_key = base64.b64encode(b"STORE_048#CASH_1190#9221583").decode()
-        b64_audit_col = base64.b64encode(b"audit_status").decode()
-        b64_audit_val = base64.b64encode(b"clear").decode()
-        b64_txn_col = base64.b64encode(b"cashier_1h_txn_count").decode()
-        b64_txn_val = base64.b64encode(struct.pack(">q", 25)).decode()
-        b64_override_col = base64.b64encode(b"cashier_1h_manual_override_count").decode()
-        b64_override_val = base64.b64encode(struct.pack(">q", 5)).decode()
-        b64_override_rate_col = base64.b64encode(b"cashier_1h_override_rate").decode()
-        b64_override_rate_val = base64.b64encode(struct.pack(">d", 0.20)).decode()
-
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "result": {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps({
-                            "_key": b64_key,
-                            "flags": {b64_audit_col: b64_audit_val},
-                            "stats": {
-                                b64_txn_col: b64_txn_val,
-                                b64_override_col: b64_override_val,
-                                b64_override_rate_col: b64_override_rate_val,
-                            },
-                        }),
-                    }
-                ]
-            }
+    def test_decode_family_unpacks_packed_numerics(self):
+        """Bigtable returns 8-byte big-endian doubles/int64s wrapped in base64."""
+        family = {
+            _b64(b"cashier_1h_txn_count"): _b64(struct.pack(">q", 28)),
+            _b64(b"cashier_1h_total_discount_usd"): _b64(struct.pack(">d", 5293.57)),
         }
-        mock_client.post.return_value = mock_resp
 
-        result = read_cashier_realtime_alerts("48", "1190")
+        decoded = _decode_family(family, numeric=True)
+
+        assert decoded["cashier_1h_txn_count"] == 28
+        assert decoded["cashier_1h_total_discount_usd"] == 5293.57
+
+    @pytest.mark.asyncio
+    async def test_agent_facing_tools_are_decoding_wrappers(self):
+        """Regression: the agent must never be handed the raw MCP tools.
+
+        The MCP Toolbox exposes tools with these same names, but they return
+        base64-wrapped, struct-packed Bigtable cells that a model cannot interpret.
+        The toolset must therefore surface the typed Python wrappers instead.
+        """
+        tools = await bigtable_mcp_toolset.get_tools()
+
+        assert {t.name for t in tools} == {
+            "read_cashier_realtime_alerts",
+            "read_pos_transactions_enriched",
+        }
+        assert all(isinstance(t, FunctionTool) for t in tools), (
+            "expected decoding FunctionTool wrappers, not raw MCPTool instances"
+        )
+
+    @pytest.mark.asyncio
+    @patch("app.tools.bigtable_tool._call_mcp_tool")
+    async def test_read_cashier_realtime_alerts_decodes_payload(self, mock_call):
+        mock_call.return_value = [
+            {
+                "_key": _b64(b"STORE_048#CASH_1190#9221583"),
+                "flags": {_b64(b"audit_status"): _b64(b"clear")},
+                "stats": {
+                    _b64(b"cashier_1h_txn_count"): _b64(struct.pack(">q", 25)),
+                    _b64(b"cashier_1h_manual_override_count"): _b64(struct.pack(">q", 5)),
+                    _b64(b"cashier_1h_override_rate"): _b64(struct.pack(">d", 0.20)),
+                },
+            }
+        ]
+
+        result = await read_cashier_realtime_alerts("48", "1190", MagicMock())
+
         assert "CASH_1190 (STORE_048)" in result
         assert "CLEAR" in result
         assert "20.00%" in result
         assert "5 overrides across 25 transactions" in result
+        # The model must not be shown raw base64.
+        assert "Y2FzaGll" not in result
 
-    @patch("httpx.Client")
-    @patch("app.tools.bigtable_tool.get_oidc_bearer_token", return_value="mock-token-123")
-    def test_read_cashier_realtime_alerts_not_found(self, mock_token, mock_client_cls):
-        mock_client = MagicMock()
-        mock_client_cls.return_value.__enter__.return_value = mock_client
+        # Agent-friendly args must be normalised into a row-key prefix for the MCP tool.
+        assert mock_call.call_args[0][1] == {"prefix": "STORE_048#CASH_1190%"}
 
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"result": {"content": []}}
-        mock_client.post.return_value = mock_resp
+    @pytest.mark.asyncio
+    @patch("app.tools.bigtable_tool._call_mcp_tool")
+    async def test_read_cashier_realtime_alerts_not_found(self, mock_call):
+        mock_call.return_value = []
 
-        result = read_cashier_realtime_alerts("99", "9999")
+        result = await read_cashier_realtime_alerts("99", "9999", MagicMock())
+
         assert "No real-time alert records found for Cashier CASH_9999 at STORE_099" in result
 
-    @patch("httpx.Client")
-    @patch("app.tools.bigtable_tool.get_oidc_bearer_token", return_value="mock-token-123")
-    def test_read_pos_transactions_enriched_remote_mcp(self, mock_token, mock_client_cls):
-        """Verifies remote declarative MCP lookup and base64 parsing for enriched transactions."""
-        mock_client = MagicMock()
-        mock_client_cls.return_value.__enter__.return_value = mock_client
+    @pytest.mark.asyncio
+    @patch("app.tools.bigtable_tool._call_mcp_tool")
+    async def test_read_cashier_realtime_alerts_connectivity_fallback(self, mock_call):
+        """Persistent transport failure must degrade to a user-friendly message."""
+        mock_call.side_effect = Exception("Connection refused")
 
-        b64_key = base64.b64encode(b"STORE_001#TXN-20260910-0000727").decode("utf-8")
-        b64_total_col = base64.b64encode(b"total").decode("utf-8")
-        b64_total_val = base64.b64encode(b"383.93").decode("utf-8")
-        b64_cashier_col = base64.b64encode(b"cashier_id").decode("utf-8")
-        b64_cashier_val = base64.b64encode(b"CASH_1002").decode("utf-8")
+        result = await read_cashier_realtime_alerts("48", "1190", MagicMock())
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "result": {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps({
-                            "_key": b64_key,
-                            "tx": {
-                                b64_total_col: b64_total_val,
-                                b64_cashier_col: b64_cashier_val,
-                            },
-                            "alerts": {},
-                        }),
-                    }
-                ]
+        assert "transient" in result.lower()
+        assert mock_call.call_count == 3, "expected 3 attempts with exponential backoff"
+
+    @pytest.mark.asyncio
+    @patch("app.tools.bigtable_tool._call_mcp_tool")
+    async def test_read_pos_transactions_enriched_decodes_payload(self, mock_call):
+        mock_call.return_value = [
+            {
+                "_key": _b64(b"STORE_001#TXN-20260910-0000727"),
+                "tx": {
+                    _b64(b"total"): _b64(b"383.93"),
+                    _b64(b"cashier_id"): _b64(b"CASH_1002"),
+                },
+                "alerts": {},
             }
-        }
-        mock_client.post.return_value = mock_resp
+        ]
 
-        result = read_pos_transactions_enriched("1", transaction_id="TXN-20260910-0000727")
+        result = await read_pos_transactions_enriched(
+            "1", MagicMock(), transaction_id="TXN-20260910-0000727"
+        )
+
         assert "Cloud Bigtable Enriched Transactions" in result
         assert "STORE_001" in result
         assert "CASH_1002" in result
         assert "$383.93" in result
 
-    @patch("httpx.Client")
-    @patch("app.tools.bigtable_tool.get_oidc_bearer_token", return_value="mock-token-123")
-    @patch("google.cloud.bigtable.Client")
-    def test_read_pos_transactions_enriched_local_fallback(
-        self, mock_bt_client_cls, mock_token, mock_http_client_cls
-    ):
-        """Verifies local native Bigtable fallback when remote MCP fails."""
-        # Force remote MCP failure
-        mock_http_client = MagicMock()
-        mock_http_client_cls.return_value.__enter__.return_value = mock_http_client
-        mock_http_client.post.side_effect = Exception("Connection refused")
-
-        # Mock Bigtable native client
-        mock_bt_client = MagicMock()
-        mock_bt_client_cls.return_value = mock_bt_client
-        mock_table = MagicMock()
-        mock_bt_client.instance.return_value.table.return_value = mock_table
-
-        mock_row = MagicMock()
-        mock_row.row_key = b"STORE_048#TXN-20260906-0220917"
-        mock_cell_cashier = MagicMock()
-        mock_cell_cashier.value = b"CASH_1190"
-        mock_cell_total = MagicMock()
-        mock_cell_total.value = b"59.38"
-
-        mock_row.cells = {
-            "tx": {
-                b"cashier_id": [mock_cell_cashier],
-                b"total": [mock_cell_total],
+    @pytest.mark.asyncio
+    @patch("app.tools.bigtable_tool._call_mcp_tool")
+    async def test_read_pos_transactions_enriched_filters_by_cashier(self, mock_call):
+        mock_call.return_value = [
+            {
+                "_key": _b64(b"STORE_048#TXN-1"),
+                "tx": {_b64(b"cashier_id"): _b64(b"CASH_1190"), _b64(b"total"): _b64(b"59.38")},
+                "alerts": {},
             },
-            "alerts": {},
-        }
-        mock_table.read_row.return_value = mock_row
+            {
+                "_key": _b64(b"STORE_048#TXN-2"),
+                "tx": {_b64(b"cashier_id"): _b64(b"CASH_2000"), _b64(b"total"): _b64(b"12.00")},
+                "alerts": {},
+            },
+        ]
 
-        result = read_pos_transactions_enriched("48", transaction_id="TXN-20260906-0220917")
-        assert "Cloud Bigtable Enriched Transactions" in result
-        assert "STORE_048" in result
+        result = await read_pos_transactions_enriched("48", MagicMock(), cashier_id="1190")
+
+        assert "Matched Records:** 1" in result
         assert "CASH_1190" in result
-        assert "$59.38" in result
+        assert "CASH_2000" not in result

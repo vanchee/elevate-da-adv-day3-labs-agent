@@ -14,39 +14,40 @@
 
 """RAG tool for POS hardware troubleshooting using BigQuery vector search."""
 
+import asyncio
 import logging
-import os
 import re
-import time
-from typing import Optional
+from typing import Any, Optional
 
-import google.auth
 from google.cloud import bigquery
+
+from app import config
 
 logger = logging.getLogger(__name__)
 
-
-def _discover_project_id() -> str:
-    """Discovers project ID dynamically from environment or ADC without hardcoding."""
-    if os.environ.get("PROJECT_ID"):
-        return os.environ["PROJECT_ID"]
-    try:
-        _, project = google.auth.default()
-        if project:
-            return project
-    except Exception:
-        pass
-    return "pvelevate-project"
-
-
-PROJECT_ID = _discover_project_id()
-DATASET_ID = "cymbal_gold"
-CHUNK_TABLE_ID = f"{PROJECT_ID}.{DATASET_ID}.pos_manual_chunk_embeddings"
-SIMILARITY_THRESHOLD = 0.70
+# Sliding-window chunks are 500 chars with 100 chars of overlap, so adjacent chunks
+# repeat their first 100 characters. Trim that when stitching N-1..N+1 together.
+CHUNK_OVERLAP_CHARS = 100
 
 OUT_OF_SCOPE_DECLINE_STRING = (
     "I cannot find certified warranty or repair rules for this specific error in our technical repository."
 )
+
+_ERROR_CODE_PATTERN = re.compile(r"[A-Z]{3,}-[A-Z0-9\-]+")
+
+_client: Optional[bigquery.Client] = None
+
+
+def _get_client() -> bigquery.Client:
+    """Returns a lazily-created, module-level BigQuery client.
+
+    Reusing one client avoids re-doing ADC discovery and the TLS handshake on every
+    tool call.
+    """
+    global _client
+    if _client is None:
+        _client = bigquery.Client(project=config.get_project_id())
+    return _client
 
 
 def _format_gcs_link(uri: Optional[str]) -> str:
@@ -58,7 +59,69 @@ def _format_gcs_link(uri: Optional[str]) -> str:
     return uri
 
 
-def pos_troubleshooting_rag_tool(query: str) -> str:
+def _extract_error_code(query: str) -> str:
+    """Extracts the first hardware error code (e.g. ERR-PAY-4001) from a query."""
+    matches = _ERROR_CODE_PATTERN.findall(query)
+    return matches[0] if matches else ""
+
+
+def _job_config(**params: Any) -> bigquery.QueryJobConfig:
+    """Builds a parameterised job config with the shared cost guardrail applied."""
+    return bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter(name, "STRING", value)
+            for name, value in params.items()
+        ],
+        maximum_bytes_billed=config.MAX_BYTES_BILLED,
+    )
+
+
+async def _run_query(sql: str, job_config: bigquery.QueryJobConfig) -> list:
+    """Runs a BigQuery query off the event loop so concurrent tool calls stay parallel."""
+    def _blocking() -> list:
+        return list(_get_client().query(sql, job_config=job_config).result())
+
+    return await asyncio.to_thread(_blocking)
+
+
+def _stitch(chunks: list[tuple[int, str]]) -> str:
+    """Concatenates adjacent chunks, removing the repeated sliding-window overlap.
+
+    Chunks arrive ordered by chunk_index. Every chunk after the first repeats the
+    trailing CHUNK_OVERLAP_CHARS of its predecessor, so that prefix is dropped to
+    avoid emitting duplicated sentences to the model.
+    """
+    parts: list[str] = []
+    for position, (_, content) in enumerate(chunks):
+        text = content or ""
+        if position > 0 and len(text) > CHUNK_OVERLAP_CHARS:
+            text = text[CHUNK_OVERLAP_CHARS:]
+        parts.append(text)
+    return "".join(parts).strip()
+
+
+def _format_hit(row: Any, stitched: str, exact_match: bool) -> str:
+    """Renders a single retrieval hit with its true cosine score and provenance."""
+    doc_title = row.document_title or "POS Manual"
+    equipment = row.equipment_covered or "POS Terminal"
+    doc_link = _format_gcs_link(row.source_pdf_uri)
+    filename = row.document_filename or "Runbook"
+    similarity = float(row.similarity_score) if row.similarity_score is not None else 0.0
+
+    if exact_match:
+        basis = "exact error-code match in chunk text"
+    else:
+        basis = f"cosine ≥ {config.SIMILARITY_THRESHOLD:.2f} threshold"
+
+    return (
+        f"### {doc_title} ({equipment})\n"
+        f"**Certified Reference Document:** [{filename}]({doc_link})\n"
+        f"**Similarity Score:** {similarity:.4f} (cosine)  ·  **Matched on:** {basis}\n\n"
+        f"#### Troubleshooting Procedure:\n{stitched}"
+    )
+
+
+async def pos_troubleshooting_rag_tool(query: str) -> str:
     """Performs semantic vector search over POS terminal runbooks and manuals in BigQuery.
 
     Use this tool to resolve POS terminal hardware error codes (such as ERR-PAY-4001,
@@ -71,15 +134,14 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
     Returns:
         Troubleshooting procedure with source documentation link, or safety warning if out-of-scope.
     """
-    max_retries = 3
-    base_delay = 1.0
+    error_code = _extract_error_code(query)
+    chunk_table = config.get_pos_chunk_table_id()
 
-    # Extract hardware error codes (e.g. ERR-PAY-4001, ERR-DN-PRNT-24V)
-    error_code_matches = re.findall(r'[A-Z]{3,}-[A-Z0-9\-]+', query)
-    error_code = error_code_matches[0] if error_code_matches else ""
-
-    client = bigquery.Client(project=PROJECT_ID)
-
+    # `similarity_score` is the true cosine similarity and is the ONLY value gated
+    # against the safety threshold or shown to the user. `rank_score` adds a lexical
+    # bonus for an exact error-code hit and is used solely for ordering, because pure
+    # cosine ranking can favour a different vendor's manual that discusses the same
+    # symptom in more general language.
     vector_sql = f"""
     WITH query_embed AS (
       SELECT AI.EMBED(@query_text, endpoint => 'text-embedding-005').result AS qvec
@@ -91,18 +153,16 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
         m.base.equipment_covered,
         m.base.source_pdf_uri,
         m.base.chunk_index,
-        m.base.chunk_content,
-        ROUND(1 - m.distance, 4) AS base_similarity_score,
-        CASE
-          WHEN @error_code != '' AND m.base.chunk_content LIKE CONCAT('%', @error_code, '%')
-          THEN LEAST(1.0, ROUND(1 - m.distance, 4) + 0.20)
-          ELSE ROUND(1 - m.distance, 4)
-        END AS similarity_score
+        ROUND(1 - m.distance, 4) AS similarity_score,
+        (@error_code != '' AND m.base.chunk_content LIKE CONCAT('%', @error_code, '%')) AS exact_error_match,
+        ROUND(1 - m.distance, 4)
+          + IF(@error_code != '' AND m.base.chunk_content LIKE CONCAT('%', @error_code, '%'), 0.20, 0.0)
+          AS rank_score
       FROM VECTOR_SEARCH(
-        TABLE `{CHUNK_TABLE_ID}`,
+        TABLE `{chunk_table}`,
         'embedding',
         (SELECT qvec FROM query_embed),
-        top_k => 3,
+        top_k => {config.RAG_TOP_K},
         distance_type => 'COSINE'
       ) m
     )
@@ -113,105 +173,117 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
       rm.source_pdf_uri,
       rm.chunk_index AS center_chunk_index,
       rm.similarity_score,
-      STRING_AGG(c.chunk_content, '\\n\\n' ORDER BY c.chunk_index ASC) AS stitched_content
+      rm.exact_error_match,
+      rm.rank_score,
+      ARRAY_AGG(STRUCT(c.chunk_index AS idx, c.chunk_content AS content) ORDER BY c.chunk_index ASC) AS context_chunks
     FROM raw_matches rm
-    JOIN `{CHUNK_TABLE_ID}` c
+    JOIN `{chunk_table}` c
       ON rm.document_filename = c.document_filename
      AND c.chunk_index BETWEEN (rm.chunk_index - 1) AND (rm.chunk_index + 1)
-    GROUP BY rm.document_filename, rm.document_title, rm.equipment_covered, rm.source_pdf_uri, rm.chunk_index, rm.similarity_score
-    ORDER BY rm.similarity_score DESC
-    LIMIT 1
+    GROUP BY
+      rm.document_filename, rm.document_title, rm.equipment_covered, rm.source_pdf_uri,
+      rm.chunk_index, rm.similarity_score, rm.exact_error_match, rm.rank_score
+    ORDER BY rm.rank_score DESC
     """
 
-    for attempt in range(1, max_retries + 1):
+    last_error: Optional[Exception] = None
+    for attempt in range(1, config.MAX_RETRIES + 1):
         try:
-            logger.info("Executing VECTOR_SEARCH on POS chunks (attempt %d): %s (error_code: %s)", attempt, query, error_code)
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("query_text", "STRING", query),
-                    bigquery.ScalarQueryParameter("error_code", "STRING", error_code),
-                ]
+            logger.info(
+                "Executing VECTOR_SEARCH on POS chunks (attempt %d): %s (error_code: %s)",
+                attempt, query, error_code or "n/a",
             )
-            rows = list(client.query(vector_sql, job_config=job_config).result())
-
-            if rows:
-                row = rows[0]
-                similarity = float(row.similarity_score) if row.similarity_score is not None else 0.0
-                doc_title = row.document_title or "POS Manual"
-                equipment = row.equipment_covered or "POS Terminal"
-                doc_link = _format_gcs_link(row.source_pdf_uri)
-                stitched_content = row.stitched_content or ""
-
-                if similarity >= SIMILARITY_THRESHOLD:
-                    return (
-                        f"### {doc_title} ({equipment})\n"
-                        f"**Certified Reference Document:** [{row.document_filename or 'Runbook'}]({doc_link})\n"
-                        f"**Similarity Score:** {similarity:.4f}\n\n"
-                        f"#### Troubleshooting Procedure:\n"
-                        f"{stitched_content}"
-                    )
-
-            # Similarity threshold not met or no vector match; trigger full-text search fallback
-            logger.info("Vector similarity below %.2f or empty; triggering full-text search fallback", SIMILARITY_THRESHOLD)
-
-            # Format search_term for BigQuery SEARCH() syntax
-            if error_code:
-                search_term = f"`{error_code}`"
-            else:
-                clean_tokens = re.findall(r'[a-zA-Z0-9]+', query)
-                search_term = " ".join(clean_tokens) if clean_tokens else query
-
-            fallback_sql = f"""
-            SELECT
-              document_filename,
-              document_title,
-              equipment_covered,
-              source_pdf_uri,
-              chunk_index,
-              chunk_content,
-              CASE
-                WHEN @error_code != '' AND chunk_content LIKE CONCAT('%', @error_code, '%')
-                THEN 0.85
-                ELSE 0.75
-              END AS boosted_score
-            FROM `{CHUNK_TABLE_ID}`
-            WHERE SEARCH(chunk_content, @search_term)
-            ORDER BY boosted_score DESC
-            LIMIT 1
-            """
-            fallback_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("search_term", "STRING", search_term),
-                    bigquery.ScalarQueryParameter("error_code", "STRING", error_code),
-                ]
+            rows = await _run_query(
+                vector_sql, _job_config(query_text=query, error_code=error_code)
             )
-            fallback_rows = list(client.query(fallback_sql, job_config=fallback_config).result())
 
-            if fallback_rows:
-                fb_row = fallback_rows[0]
-                doc_title = fb_row.document_title or "POS Manual"
-                equipment = fb_row.equipment_covered or "POS Terminal"
-                doc_link = _format_gcs_link(fb_row.source_pdf_uri)
-                content = fb_row.chunk_content or ""
-                boosted_score = float(fb_row.boosted_score) if fb_row.boosted_score else 0.75
-
-                return (
-                    f"### {doc_title} ({equipment}) *(Retrieved via Full-Text Search Fallback)*\n"
-                    f"**Certified Reference Document:** [{fb_row.document_filename or 'Runbook'}]({doc_link})\n"
-                    f"**Relevance Score:** {boosted_score:.4f}\n\n"
-                    f"#### Troubleshooting Procedure:\n"
-                    f"{content}"
+            # A chunk is certified if it clears the cosine threshold OR literally
+            # contains the queried error code. The lexical signal is deliberately an
+            # independent admission criterion rather than a bonus folded into the
+            # score: an exact code hit is stronger evidence than fuzzy similarity, and
+            # keeping them separate means the reported score stays a true cosine and
+            # the threshold still rejects genuinely out-of-scope questions.
+            certified = [
+                r for r in rows
+                if bool(r.exact_error_match)
+                or (
+                    r.similarity_score is not None
+                    and float(r.similarity_score) >= config.SIMILARITY_THRESHOLD
                 )
+            ]
 
-            # Truly out-of-scope query
-            return OUT_OF_SCOPE_DECLINE_STRING
+            if certified:
+                sections = [
+                    _format_hit(
+                        r,
+                        _stitch([(c["idx"], c["content"]) for c in r.context_chunks]),
+                        bool(r.exact_error_match),
+                    )
+                    for r in certified
+                ]
+                return "\n\n---\n\n".join(sections)
+
+            logger.info(
+                "No chunk met the %.2f cosine threshold; falling back to full-text SEARCH()",
+                config.SIMILARITY_THRESHOLD,
+            )
+            return await _full_text_fallback(query, error_code, chunk_table)
 
         except Exception as e:
-            logger.warning("Error querying BigQuery RAG table on attempt %d: %s", attempt, str(e))
-            if attempt < max_retries:
-                time.sleep(base_delay * (2 ** (attempt - 1)))
+            last_error = e
+            logger.warning("Error querying BigQuery RAG table on attempt %d: %s", attempt, e)
+            if attempt < config.MAX_RETRIES:
+                await asyncio.sleep(config.RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
 
+    logger.error("POS RAG retrieval failed after %d attempts: %s", config.MAX_RETRIES, last_error)
     return (
         "POS troubleshooting documentation is temporarily unavailable due to a database connectivity issue. "
         "Please retry your inquiry shortly."
+    )
+
+
+async def _full_text_fallback(query: str, error_code: str, chunk_table: str) -> str:
+    """Keyword fallback used when no chunk clears the cosine similarity threshold."""
+    if error_code:
+        search_term = f"`{error_code}`"
+    else:
+        clean_tokens = re.findall(r"[a-zA-Z0-9]+", query)
+        search_term = " ".join(clean_tokens) if clean_tokens else query
+
+    fallback_sql = f"""
+    SELECT
+      document_filename,
+      document_title,
+      equipment_covered,
+      source_pdf_uri,
+      chunk_index,
+      chunk_content
+    FROM `{chunk_table}`
+    WHERE SEARCH(chunk_content, @search_term)
+    ORDER BY
+      IF(@error_code != '' AND chunk_content LIKE CONCAT('%', @error_code, '%'), 0, 1),
+      chunk_index
+    LIMIT 1
+    """
+
+    rows = await _run_query(
+        fallback_sql, _job_config(search_term=search_term, error_code=error_code)
+    )
+    if not rows:
+        return OUT_OF_SCOPE_DECLINE_STRING
+
+    row = rows[0]
+    doc_title = row.document_title or "POS Manual"
+    equipment = row.equipment_covered or "POS Terminal"
+    doc_link = _format_gcs_link(row.source_pdf_uri)
+    filename = row.document_filename or "Runbook"
+
+    # No similarity score is reported here: this result came from a keyword match, not
+    # from vector search, so inventing a numeric relevance value would be misleading.
+    return (
+        f"### {doc_title} ({equipment}) *(Retrieved via Full-Text Search Fallback)*\n"
+        f"**Certified Reference Document:** [{filename}]({doc_link})\n"
+        f"**Retrieval Method:** Keyword match — below the "
+        f"{config.SIMILARITY_THRESHOLD:.2f} vector similarity threshold, treat as unverified.\n\n"
+        f"#### Troubleshooting Procedure:\n{row.chunk_content or ''}"
     )

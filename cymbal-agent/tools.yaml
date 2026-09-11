@@ -1,7 +1,16 @@
+# MCP Toolbox configuration for the Cloud Bigtable operational datastore.
+#
+# Deployed to Cloud Run as `mcp-toolbox-bigtable` with this file mounted from the
+# Secret Manager secret `bigtable-mcp-tools-secret`. Substitute the project before
+# uploading:
+#
+#   sed -i "s/<PROJECT_ID>/${PROJECT_ID}/g" tools.yaml
+#   gcloud secrets versions add bigtable-mcp-tools-secret --data-file=tools.yaml
+
 sources:
   operations-db:
     kind: bigtable
-    project: pvelevate-project
+    project: <PROJECT_ID>
     instance: operations-db
 
 tools:
@@ -9,7 +18,10 @@ tools:
     kind: bigtable-sql
     source: operations-db
     description: "Reads live 1-hour rolling metrics and audit status flags for a cashier from Cloud Bigtable cashier_realtime_alerts using GoogleSQL."
-    statement: "SELECT * FROM cashier_realtime_alerts WHERE CAST(_key AS STRING) LIKE @prefix"
+    # Row keys are STORE_xxx#CASH_yyyy#<reversed-timestamp>, so ascending key order
+    # returns the most recent bucket first. ORDER BY is explicit rather than implied
+    # so that "the latest record" does not depend on server-side scan behaviour.
+    statement: "SELECT * FROM cashier_realtime_alerts WHERE CAST(_key AS STRING) LIKE @prefix ORDER BY _key ASC LIMIT 5"
     parameters:
       - name: prefix
         type: string
@@ -19,7 +31,7 @@ tools:
     kind: bigtable-sql
     source: operations-db
     description: "Reads enriched frontline POS transactions, manual override flags, and anomaly alerts from Cloud Bigtable pos_transactions_enriched using GoogleSQL."
-    statement: "SELECT * FROM pos_transactions_enriched WHERE CAST(_key AS STRING) LIKE @prefix"
+    statement: "SELECT * FROM pos_transactions_enriched WHERE CAST(_key AS STRING) LIKE @prefix ORDER BY _key ASC LIMIT 25"
     parameters:
       - name: prefix
         type: string

@@ -12,11 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Live integration tests for the Cymbal Operations Coordinator Agent.
+
+These assert on the ADK trace - which tools were dispatched, in which turn - rather
+than only on keywords in the final prose. A response can easily contain the word
+"cashier" without any tool having run, so keyword-only assertions would pass even if
+the agent silently stopped calling its tools.
+"""
+
 import os
+
 import google.auth
+import pytest
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 # Ensure Vertex AI mode is enabled by default using ADC if no Gemini API key is set
@@ -36,68 +45,135 @@ from app.agent import root_agent
 from app.app_utils.services import get_session_service
 
 
-def test_agent_stream_hardware_troubleshooting() -> None:
-    """Integration test for agent streaming on POS hardware troubleshooting (ERR-PAY-4001)."""
+def _run(prompt: str, user_id: str) -> list:
+    """Runs one turn against the coordinator agent and returns the raw event list."""
     session_service = get_session_service()
-    session = session_service.create_session_sync(user_id="store_manager_01", app_name="app")
+    session = session_service.create_session_sync(user_id=user_id, app_name="app")
     runner = Runner(agent=root_agent, session_service=session_service, app_name="app")
 
-    message = types.Content(
-        role="user",
-        parts=[types.Part.from_text(text="How do I fix error code ERR-PAY-4001 on the POS EMV terminal reader?")],
-    )
-
-    events = list(
+    message = types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
+    return list(
         runner.run(
             new_message=message,
-            user_id="store_manager_01",
+            user_id=user_id,
             session_id=session.id,
             run_config=RunConfig(streaming_mode=StreamingMode.SSE),
         )
     )
-    assert len(events) > 0, "Expected at least one streaming event"
 
-    all_texts = []
+
+def _tool_calls(events: list) -> list[str]:
+    """Returns every tool name invoked across the run, in dispatch order."""
+    names = []
+    for event in events:
+        if not event.content or not event.content.parts:
+            continue
+        for part in event.content.parts:
+            if part.function_call:
+                names.append(part.function_call.name)
+    return names
+
+
+def _parallel_call_groups(events: list) -> list[list[str]]:
+    """Returns tool names grouped by event.
+
+    ADK emits all function calls the model requested in a single turn as parts of one
+    event, so a group with more than one entry is a genuine parallel dispatch.
+    """
+    groups = []
+    for event in events:
+        if not event.content or not event.content.parts:
+            continue
+        names = [p.function_call.name for p in event.content.parts if p.function_call]
+        if names:
+            groups.append(names)
+    return groups
+
+
+def _text(events: list) -> str:
+    parts = []
     for event in events:
         if event.content and event.content.parts:
             for part in event.content.parts:
                 if part.text:
-                    all_texts.append(part.text)
+                    parts.append(part.text)
+    return " ".join(parts)
 
-    combined_text = " ".join(all_texts)
-    assert len(combined_text) > 0, "Expected non-empty text in streaming response"
-    # Agent should provide troubleshooting steps or reference runbook
-    assert any(term in combined_text.lower() for term in ["err-pay-4001", "emv", "terminal", "reader", "pos"])
+
+def test_agent_stream_hardware_troubleshooting() -> None:
+    """UC 1.1a: hardware fault must be routed to the RAG tool and cite the runbook."""
+    events = _run(
+        "How do I fix error code ERR-PAY-4001 on the POS EMV terminal reader?",
+        "store_manager_01",
+    )
+
+    assert "pos_troubleshooting_rag_tool" in _tool_calls(events)
+
+    combined = _text(events)
+    assert len(combined) > 0, "Expected non-empty text in streaming response"
+    assert any(term in combined.lower() for term in ["err-pay-4001", "emv", "reader"])
 
 
 def test_agent_stream_cashier_live_audit() -> None:
-    """Integration test for agent streaming on cashier real-time metrics and audit status."""
-    session_service = get_session_service()
-    session = session_service.create_session_sync(user_id="audit_lead_01", app_name="app")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="app")
-
-    message = types.Content(
-        role="user",
-        parts=[types.Part.from_text(text="What are the live rolling 1-hour metrics and override rate for Cashier CASH_1190 at Store 48?")],
+    """UC 1.3: live cashier metrics must come from Bigtable, decoded (not base64)."""
+    events = _run(
+        "What are the live rolling 1-hour metrics and override rate for Cashier CASH_1190 at Store 48?",
+        "audit_lead_01",
     )
 
-    events = list(
-        runner.run(
-            new_message=message,
-            user_id="audit_lead_01",
-            session_id=session.id,
-            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-        )
+    assert "read_cashier_realtime_alerts" in _tool_calls(events)
+
+    combined = _text(events)
+    assert len(combined) > 0
+    assert "1190" in combined
+    # Regression guard: the model must never be relaying raw base64 Bigtable cells.
+    assert "Y2FzaGll" not in combined, "raw base64 leaked into the agent response"
+
+
+def test_agent_out_of_scope_hardware_declines() -> None:
+    """UC 1.1c: out-of-scope hardware must trigger the certified decline, not a guess."""
+    events = _run(
+        "How do I replace the engine oil on a Ford F-150 truck?",
+        "store_manager_02",
     )
-    assert len(events) > 0, "Expected at least one streaming event"
 
-    all_texts = []
-    for event in events:
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if part.text:
-                    all_texts.append(part.text)
+    combined = _text(events).lower()
+    assert any(
+        phrase in combined
+        for phrase in ["cannot find", "not able to", "no certified", "outside", "unable to"]
+    ), f"Expected a refusal for out-of-scope hardware, got: {combined[:300]}"
 
-    combined_text = " ".join(all_texts)
-    assert len(combined_text) > 0, "Expected non-empty text in streaming response"
-    assert any(term in combined_text.lower() for term in ["1190", "store", "cashier", "override", "audit", "metrics"])
+
+@pytest.mark.slow
+def test_agent_parallel_dispatch_dual_cashier_baseline() -> None:
+    """UC 2.2: live-vs-baseline comparison must dispatch both tools in a single turn."""
+    events = _run(
+        "What is Cashier CASH_1190's live 1-hour override rate right now, compared to "
+        "their 7-day historical override baseline?",
+        "audit_lead_02",
+    )
+
+    calls = _tool_calls(events)
+    assert "read_cashier_realtime_alerts" in calls, f"Bigtable tool not called; saw {calls}"
+    assert "cymbal_analytics_tool" in calls, f"Analytics tool not called; saw {calls}"
+
+    groups = _parallel_call_groups(events)
+    assert any(len(group) > 1 for group in groups), (
+        f"Expected a parallel dispatch (2+ tool calls in one turn), got groups: {groups}"
+    )
+
+
+@pytest.mark.slow
+def test_agent_sequential_dispatch_cross_cloud_audit() -> None:
+    """UC 2.3: offender ranking then log retrieval must be two sequential turns."""
+    events = _run(
+        "Show cashiers with active cashier promo abuse alerts in the last 7 days and "
+        "retrieve checkout logs for the top offender.",
+        "auditor_01",
+    )
+
+    groups = _parallel_call_groups(events)
+    assert len(groups) >= 2, f"Expected at least two sequential dispatch turns, got: {groups}"
+    assert all("cymbal_analytics_tool" in g for g in groups[:2]), (
+        f"Expected both audit turns to query the analytics layer, got: {groups}"
+    )
