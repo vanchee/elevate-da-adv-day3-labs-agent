@@ -14,16 +14,22 @@
 
 """Cymbal Operations Coordinator Agent built with Google Agent Development Kit (ADK)."""
 
+import logging
 import os
+
 from google.adk.agents import Agent
 from google.adk.apps import App
 from google.adk.models import Gemini
+from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from app import config
 from app.tools.analytics_tool import cymbal_analytics_tool
 from app.tools.bigtable_tool import bigtable_mcp_toolset
 from app.tools.rag_tool import pos_troubleshooting_rag_tool
 from app.tools.store_resolution_tool import resolve_store_identifier
+
+logger = logging.getLogger(__name__)
 
 MODEL = os.environ.get("MODEL", "gemini-3.6-flash")
 
@@ -86,14 +92,39 @@ C. SEQUENTIAL MULTI-TURN DISPATCH (Cross-Cloud Audit Workflows):
      * Turn 2: Once the top offender's ID and store are identified, call `cymbal_analytics_tool` again to retrieve their cross-cloud checkout logs (e.g. from AWS S3 federated checkout ledger or BigQuery POS transactions).
      * Synthesize the complete audit trail clearly for store leads and auditors.
 
-D. STORE ENTITY RESOLUTION (mandatory pre-step):
+D. ENTITY IDENTIFIER DISCIPLINE (mandatory pre-step):
    - When the user names a store in words rather than by ID, call `resolve_store_identifier` FIRST and
      use the `store_id` it returns in every downstream tool call.
    - NEVER guess or invent a `store_id`, and never substitute a store name into an analytics query in
      place of an ID.
+   - This applies to EVERY entity identifier, not just store names. A `store_id`, `terminal_id`,
+     `register_id` or `cashier_id` may only appear in a tool call if the user supplied it verbatim
+     or a previous tool returned it. You may NOT derive one identifier from another: being given
+     `CASH_1190` does not tell you which store that cashier works at.
+   - If you need an identifier you do not have, either query for it (`cymbal_analytics_tool` can
+     look up a cashier's store) or ask the user. Do not filter on a plausible-looking value —
+     a wrong ID returns a clean, confident, entirely fictitious answer.
    - If the tool reports ambiguity or no confident match, relay its question to the user and STOP.
      Do not call any data tool until the user has chosen a specific store.
-   - Skip this step when the user already supplied an explicit `STORE_0NN` identifier.
+   - Skip the resolution step when the user already supplied an explicit `STORE_0NN` identifier.
+
+
+E. GROUNDING DISCIPLINE (applies to every answer):
+   - State only what the tool results actually contain. If a number, status or field is not in
+     the tool output, do not report it.
+   - Do NOT describe a trend, comparison or change unless you have retrieved BOTH sides of it.
+     A single point-in-time reading supports "the current rate is X". It does not support
+     "X is up/down from baseline", and it never supports a delta to two decimal places.
+   - Do NOT compare two quantities unless they are the same kind of measurement. A share of
+     alert types is not a rate over transactions; reporting one against the other produces a
+     confident, precise and meaningless number.
+   - Do not volunteer remediation steps, audit actions or investigative recommendations unless
+     the user asked what to do. When you are asked, present them under an explicit
+     "Recommended next steps" heading so advice is never mistaken for retrieved fact.
+   - When a tool returns nothing, say so plainly. An empty result is a finding; it is not an
+     invitation to fill the gap from background knowledge. Note that under row-level security
+     an unauthorised principal legitimately sees zero rows, so "no rows" means "nothing visible
+     to this identity", not "nothing exists".
 
 Maintain precision, cite source tables and certified runbook links when available, and provide executive-ready summaries.
 """
@@ -117,7 +148,54 @@ cymbal_operations_agent = Agent(
 # Alias for standard ADK runner and app discovery
 root_agent = cymbal_operations_agent
 
+
+def _build_plugins() -> list[BasePlugin]:
+    """Assembles the runtime plugin chain.
+
+    Telemetry is deliberately fail-open. The plugin talks to a different backend
+    (BigQuery Storage Write API) than the agent's own tools, so a permissions gap
+    or a missing dataset in one environment must not take the agent itself down —
+    an agent that answers without logging beats an agent that refuses to start.
+    The failure is logged loudly so it does not go unnoticed.
+    """
+    if not config.BQ_TELEMETRY_ENABLED:
+        logger.info("BigQuery agent telemetry disabled via BQ_TELEMETRY_ENABLED.")
+        return []
+
+    try:
+        from google.adk.plugins.bigquery_agent_analytics_plugin import (
+            BigQueryAgentAnalyticsPlugin,
+        )
+
+        telemetry_plugin = BigQueryAgentAnalyticsPlugin(
+            project_id=config.get_project_id(),
+            dataset_id=config.BQ_TELEMETRY_DATASET,
+            table_id=config.BQ_TELEMETRY_TABLE,
+            # Must match the dataset's actual location. The plugin defaults to
+            # multi-region "US", which resolves to a different BigQuery instance
+            # than our us-central1 dataset and fails the write stream lookup.
+            location=config.get_region(),
+        )
+    except Exception:
+        logger.exception(
+            "Could not initialise BigQueryAgentAnalyticsPlugin; continuing without "
+            "telemetry. Agent runs will NOT be recorded to %s.%s.",
+            config.BQ_TELEMETRY_DATASET,
+            config.BQ_TELEMETRY_TABLE,
+        )
+        return []
+
+    logger.info(
+        "Streaming agent telemetry to %s.%s.%s",
+        config.get_project_id(),
+        config.BQ_TELEMETRY_DATASET,
+        config.BQ_TELEMETRY_TABLE,
+    )
+    return [telemetry_plugin]
+
+
 app = App(
     root_agent=root_agent,
     name="app",
+    plugins=_build_plugins(),
 )

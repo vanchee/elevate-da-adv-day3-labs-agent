@@ -132,6 +132,17 @@ STORE_MATCH_THRESHOLD = float(os.environ.get("STORE_MATCH_THRESHOLD", "0.55"))
 MAX_RETRIES = int(os.environ.get("TOOL_MAX_RETRIES", "3"))
 RETRY_BASE_DELAY_SECONDS = float(os.environ.get("TOOL_RETRY_BASE_DELAY", "1.0"))
 
+# Agent telemetry (BigQueryAgentAnalyticsPlugin).
+# The plugin streams every prompt, model response, tool invocation, latency and
+# error to BigQuery over the Storage Write API (gRPC) on a background task, so
+# logging never sits in the request path. Disable via BQ_TELEMETRY_ENABLED=false
+# for local iteration you don't want showing up in the operational dashboards.
+BQ_TELEMETRY_DATASET = os.environ.get("BQ_TELEMETRY_DATASET", "agent_telemetry")
+# `events` (not the plugin default `agent_events`) so the auto-created views land
+# on the names the operations dashboards and query recipes expect.
+BQ_TELEMETRY_TABLE = os.environ.get("BQ_TELEMETRY_TABLE", "events")
+BQ_TELEMETRY_ENABLED = os.environ.get("BQ_TELEMETRY_ENABLED", "true").lower() == "true"
+
 
 def get_pos_chunk_table_id() -> str:
     """Returns the fully-qualified POS manual chunk embeddings table."""

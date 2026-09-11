@@ -8,7 +8,12 @@ authors = [
 
 
 dependencies = [
-    "google-adk[gcp,otel-gcp]>=2.6.0,<3.0.0",
+    # `bigquery-analytics` pulls in pyarrow + the BigQuery Storage Write API path
+    # that BigQueryAgentAnalyticsPlugin uses to stream telemetry without blocking
+    # agent execution. The extra does not exist before 2.8.0 -- with a lower floor
+    # uv happily keeps an older pin and drops the extra with only a warning, so the
+    # plugin import then fails at runtime. Keep this floor at >=2.8.0.
+    "google-adk[gcp,otel-gcp,bigquery-analytics]>=2.8.0,<3.0.0",
     "opentelemetry-resourcedetector-gcp<=1.12.0a0",
     "gcsfs>=2024.11.0",
     "a2a-sdk[http-server]>=1.0,<2",
