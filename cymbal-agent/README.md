@@ -17,10 +17,12 @@ flowchart TD
     Coordinator -->|Relational analytics| T1["<b>cymbal_analytics_tool</b><br><i>BigQuery Data Agent (NL2SQL)</i>"]
     Coordinator -->|Hardware diagnostics| T2["<b>pos_troubleshooting_rag_tool</b><br><i>BigQuery VECTOR_SEARCH</i>"]
     Coordinator -->|Real-time alerts| T3["<b>bigtable_mcp_toolset</b><br><i>Cloud Run MCP Toolbox</i>"]
+    Coordinator -->|Store name to ID| T4["<b>resolve_store_identifier</b><br><i>BigQuery VECTOR_SEARCH</i>"]
 
     T1 --> BQCA[("BigQuery Data Agent<br><code>locations/global</code>")]
     T2 --> BQV[("<code>cymbal_gold.pos_manual_chunk_embeddings</code>")]
     T3 --> CR["Cloud Run<br><code>mcp-toolbox-bigtable</code>"] --> BT[("Bigtable<br><code>operations-db</code>")]
+    T4 --> BQS[("<code>cymbal_gold.store_directory_embeddings</code>")]
 ```
 
 | Toolset | Agent-facing tools | Notes |
@@ -28,8 +30,9 @@ flowchart TD
 | `cymbal_analytics_tool` | `cymbal_analytics_tool` | Business-glossary terms are forwarded **verbatim** so the Data Agent's semantic layer resolves them. 3× exponential backoff, JSON error contract on persistent failure. |
 | `pos_troubleshooting_rag_tool` | `pos_troubleshooting_rag_tool` | Vector search + adjacent chunk stitching (N-1..N+1), `SEARCH()` keyword fallback, GCS→HTTPS citation links, `maximum_bytes_billed` cap. |
 | `bigtable_mcp_toolset` | `read_cashier_realtime_alerts`, `read_pos_transactions_enriched` | `McpToolset` is the transport; typed Python wrappers own row-key normalisation and cell decoding. |
+| `resolve_store_identifier` | `resolve_store_identifier` | Semantic `store_name` → `store_id` resolution. Refuses to guess: returns a disambiguation prompt when candidates tie, or a refusal below the `0.55` cosine floor. |
 
-### Two design decisions worth knowing
+### Three design decisions worth knowing
 
 **The Bigtable tools are wrappers, not the raw MCP tools.** The MCP Toolbox returns
 Bigtable cells exactly as stored — base64 around raw bytes, where numeric columns are
@@ -44,6 +47,30 @@ a separate internal `rank_score`. This matters because pure cosine ranking puts 
 vendor's manual on top for `ERR-PAY-4001` (HP `0.7028` vs the correct Toshiba `0.6920`),
 so the lexical signal is needed for correctness — just not for scoring.
 
+**Retrieval tools refuse rather than guess.** `resolve_store_identifier` will not pick a
+winner when two stores are indistinguishable — `STORE_001` and `STORE_013` both carry the
+name *"Cymbal Tokyo Ginza District Flagship"* and score `0.6955` vs `0.6915`. A silent
+choice there does not produce an error; it produces a confident answer about the wrong
+store, which is worse.
+
+### Authorisation model
+
+By default the agent queries as its own service identity, which makes it a confused
+deputy: a store clerk and a regional auditor asking the same question get identical
+answers. Two layers change that, and they only work together:
+
+1. **Delegation** (`app/auth.py`) — when the host application writes an end-user OAuth
+   token into `session.state["user_access_token"]`, `app/bq.py` builds a BigQuery client
+   bound to *that* principal, cached per identity. Set `REQUIRE_END_USER_AUTH=true` to
+   refuse the service-identity fallback outright.
+2. **Row-level security** (`sql/04_row_level_security.sql`) — row access policies filter
+   `pos_transactions_gold` by `SESSION_USER()` against a grant table, so isolation is
+   enforced by BigQuery beneath every tool rather than requested in a prompt.
+
+See [sql/README.md](sql/README.md) for the cost guardrails and the constraints hit while
+applying this (Iceberg tables reject row access policies; domain restricted sharing rejects
+`allAuthenticatedUsers`).
+
 ## Project Structure
 
 ```
@@ -51,12 +78,15 @@ cymbal-agent/
 ├── app/
 │   ├── agent.py               # Coordinator agent + intent routing instructions
 │   ├── config.py              # Centralised env/GCP configuration
+│   ├── auth.py                # End-user OAuth delegation
+│   ├── bq.py                  # Per-identity BigQuery clients + cost guardrails
 │   ├── tools/
-│   │   ├── analytics_tool.py  # Challenge 2.1 — BigQuery Data Agent (NL2SQL)
-│   │   ├── rag_tool.py        # Challenge 2.2 — POS manual vector search
-│   │   └── bigtable_tool.py   # Challenge 2.3 — Bigtable via MCP Toolbox
+│   │   ├── analytics_tool.py       # Challenge 2.1 — BigQuery Data Agent (NL2SQL)
+│   │   ├── rag_tool.py             # Challenge 2.2 — POS manual vector search
+│   │   ├── bigtable_tool.py        # Challenge 2.3 — Bigtable via MCP Toolbox
+│   │   └── store_resolution_tool.py # Part 5 — semantic store_name → store_id
 │   └── fast_api_app.py        # FastAPI backend server
-├── sql/                       # Challenge 2.2 chunking + embedding pipeline
+├── sql/                       # Chunking, embedding, and governance pipeline
 ├── tools.yaml                 # MCP Toolbox config (deployed via Secret Manager)
 ├── tests/                     # Unit, integration, and eval suites
 ├── GEMINI.md                  # AI-assisted development guide
@@ -76,13 +106,43 @@ agents-cli install
 
 ```bash
 export PROJECT_ID=<your-project>
-for f in sql/0*.sql; do
-  sed "s/<PROJECT_ID>/${PROJECT_ID}/g" "$f" | bq query --use_legacy_sql=false --project_id="${PROJECT_ID}"
+for f in sql/0[0-2]*.sql; do
+  sed "s/<PROJECT_ID>/${PROJECT_ID}/g" "$f" \
+    | bq query --use_legacy_sql=false --project_id="${PROJECT_ID}"
 done
 ```
 
 `sql/00_baseline_similarity_check.sql` measures the coarse Module 1 embeddings first, so
 the improvement from re-chunking is visible rather than assumed.
+
+> [!CAUTION]
+> The glob is deliberately `0[0-2]*` rather than `0*`. `sql/04_row_level_security.sql`
+> restricts data access and must never run as part of a routine index rebuild.
+
+### Building the store directory (Part 5)
+
+```bash
+sed "s/<PROJECT_ID>/${PROJECT_ID}/g" sql/03_store_directory_embeddings.sql \
+  | bq query --use_legacy_sql=false --project_id="${PROJECT_ID}"
+```
+
+Expect 16 stores at 768 dimensions, and one reported duplicate name.
+
+### Applying multi-tenant isolation (Part 5, optional)
+
+```bash
+sed -e "s/<PROJECT_ID>/${PROJECT_ID}/g" \
+    -e "s/<OPERATOR_USER>/you@example.com/g" \
+    -e "s/<AGENT_SERVICE_ACCOUNT>/${PROJECT_NUMBER}-compute@developer.gserviceaccount.com/g" \
+    -e "s/<TENANT_DOMAIN>/example.com/g" \
+    sql/04_row_level_security.sql \
+  | bq query --use_legacy_sql=false --project_id="${PROJECT_ID}"
+```
+
+> [!WARNING]
+> Once any row access policy exists on a table, principals matched by no policy see **zero
+> rows**, not an error. If the agent starts answering "no data", run
+> `sql/04_row_level_security_teardown.sql`. Read [sql/README.md](sql/README.md) first.
 
 ### Deploying the Bigtable MCP microservice (Challenge 2.3)
 
