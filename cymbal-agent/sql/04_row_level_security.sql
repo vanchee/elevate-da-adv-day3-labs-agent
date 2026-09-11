@@ -74,12 +74,23 @@ WHEN NOT MATCHED THEN
 -- ---------------------------------------------------------------------------
 -- 2. Operator escape hatch. MUST be created FIRST and MUST NOT be dropped while the
 --    per-tenant policy exists, or the agent loses all visibility.
+--
+--    Every identity the agent can run as has to appear here:
+--      <OPERATOR_USER>            - you, running the agent locally via `adk web`.
+--      <AGENT_SERVICE_ACCOUNT>    - the local/default compute identity.
+--      <RUNTIME_SERVICE_ACCOUNT>  - the service account Vertex AI Agent Runtime
+--                                   executes as once deployed.
+--    Miss the runtime service account and the deployed agent becomes a principal
+--    that no policy matches. BigQuery's behaviour there is to return ZERO ROWS,
+--    not to raise a permission error, so the Playground reports "no data found"
+--    and nothing in the logs points at row-level security.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE ROW ACCESS POLICY cymbal_operator_full_access
 ON `<PROJECT_ID>.cymbal_gold.pos_transactions_gold`
 GRANT TO (
   'user:<OPERATOR_USER>',
-  'serviceAccount:<AGENT_SERVICE_ACCOUNT>'
+  'serviceAccount:<AGENT_SERVICE_ACCOUNT>',
+  'serviceAccount:<RUNTIME_SERVICE_ACCOUNT>'
 )
 FILTER USING (TRUE);
 
