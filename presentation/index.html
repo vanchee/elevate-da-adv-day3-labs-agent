@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cymbal Operations Agent — Module 3 ADK Lab</title>
+
+<link rel="stylesheet" href="reveal/reset.css">
+<link rel="stylesheet" href="reveal/reveal.css">
+<link rel="stylesheet" href="reveal/theme/monokai.css">
+
+<style>
+  :root{
+    --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --line:#30363d;
+    --blue:#58a6ff; --green:#3fb950; --amber:#d29922; --red:#f85149; --purple:#bc8cff;
+  }
+  .reveal-viewport{ background:var(--bg); }
+  .reveal{
+    font-family:"Google Sans","Roboto",-apple-system,"Segoe UI",sans-serif;
+    color:var(--fg); font-size:30px;
+  }
+  .reveal h1,.reveal h2,.reveal h3{
+    color:#fff; text-transform:none; font-weight:600; letter-spacing:-.02em; margin-bottom:.4em;
+  }
+  .reveal h1{ font-size:2.0em; } .reveal h2{ font-size:1.45em; } .reveal h3{ font-size:1.1em; }
+  .reveal section{ text-align:left; }
+  .reveal .center{ text-align:center; }
+  .reveal em{ color:var(--blue); font-style:normal; font-weight:600; }
+  .reveal strong{ color:#fff; }
+  .reveal code{ font-family:"Roboto Mono",monospace; font-size:.85em;
+    background:#161b22; padding:.1em .35em; border-radius:4px; color:var(--blue); }
+  .reveal pre{ box-shadow:none; width:100%; font-size:.5em; }
+  .reveal pre code{ padding:1em; border-radius:8px; border:1px solid var(--line); background:#161b22; }
+
+  .reveal table{ font-size:.72em; border-collapse:collapse; width:100%; margin:.5em 0; }
+  .reveal table th{ color:var(--muted); font-weight:600; text-align:left;
+    border-bottom:2px solid var(--line); padding:.45em .6em; }
+  .reveal table td{ border-bottom:1px solid var(--line); padding:.45em .6em; }
+  .reveal table tr:last-child td{ border-bottom:none; }
+  .num{ text-align:right; font-family:"Roboto Mono",monospace; }
+
+  .kicker{ color:var(--muted); font-size:.6em; text-transform:uppercase;
+    letter-spacing:.18em; margin-bottom:.8em; }
+  .big{ font-size:1.5em; line-height:1.25; font-weight:600; color:#fff; }
+  .huge{ font-size:2.6em; font-weight:700; color:var(--blue);
+    font-family:"Roboto Mono",monospace; line-height:1; }
+  .sub{ color:var(--muted); font-size:.72em; }
+  .rule{ height:3px; width:70px; background:var(--blue); margin:.7em 0 1em; border-radius:2px; }
+
+  .grid{ display:grid; gap:.7em; }
+  .g2{ grid-template-columns:1fr 1fr; } .g3{ grid-template-columns:repeat(3,1fr); }
+  .g4{ grid-template-columns:repeat(4,1fr); }
+
+  .card{ background:#161b22; border:1px solid var(--line);
+    border-radius:10px; padding:.7em .85em; }
+  .card .t{ color:#fff; font-weight:600; font-size:.8em; margin-bottom:.15em; }
+  .card .d{ color:var(--muted); font-size:.62em; line-height:1.45; }
+  .card .m{ font-family:"Roboto Mono",monospace; font-size:.62em; color:var(--green); }
+
+  .b-blue{ border-left:3px solid var(--blue); }
+  .b-green{ border-left:3px solid var(--green); }
+  .b-amber{ border-left:3px solid var(--amber); }
+  .b-red{ border-left:3px solid var(--red); }
+  .b-purple{ border-left:3px solid var(--purple); }
+
+  .ok{ color:var(--green); } .warn{ color:var(--amber); }
+  .bad{ color:var(--red); } .info{ color:var(--blue); }
+  .mono{ font-family:"Roboto Mono",monospace; }
+
+  .callout{ background:rgba(88,166,255,.08); border:1px solid rgba(88,166,255,.35);
+    border-left:4px solid var(--blue); border-radius:8px; padding:.7em .9em; font-size:.78em; }
+  .callout.red{ background:rgba(248,81,73,.08); border-color:rgba(248,81,73,.35);
+    border-left-color:var(--red); }
+  .callout.green{ background:rgba(63,185,80,.08); border-color:rgba(63,185,80,.35);
+    border-left-color:var(--green); }
+
+  .flow{ display:flex; align-items:center; gap:.5em; justify-content:center;
+    font-size:.62em; flex-wrap:wrap; }
+  .node{ background:#161b22; border:1px solid var(--line); border-radius:8px;
+    padding:.45em .7em; text-align:center; }
+  .node .n{ color:#fff; font-weight:600; }
+  .node .s{ color:var(--muted); font-size:.8em; font-family:"Roboto Mono",monospace; }
+  .arrow{ color:var(--muted); font-size:1.3em; }
+
+  .reveal ul{ margin-left:.2em; } .reveal li{ margin-bottom:.45em; line-height:1.4; }
+  .reveal .slide-number{ background:transparent; color:var(--muted); font-size:.5em; }
+  .strike{ text-decoration:line-through; opacity:.45; }
+  .tag{ display:inline-block; font-size:.5em; padding:.15em .5em; border-radius:20px;
+    background:#161b22; border:1px solid var(--line); color:var(--muted);
+    font-family:"Roboto Mono",monospace; vertical-align:middle; margin-left:.5em; }
+  .tag.live{ border-color:var(--green); color:var(--green); }
+  .tag.baked{ border-color:var(--amber); color:var(--amber); }
+</style>
+</head>
+<body>
+<div class="reveal"><div class="slides">
+
+<!-- ══════════════ 1 · TITLE ══════════════ -->
+<section data-auto-animate>
+  <div class="center">
+    <div class="kicker">Data Analytics Advanced Elevate · Module 3</div>
+    <h1 style="margin-bottom:.15em">Cymbal Operations Agent</h1>
+    <p class="sub" style="font-size:.85em">One question. Three data systems. No humans in between.</p>
+    <div style="height:.6em"></div>
+    <p class="sub" style="font-size:.62em">Build &amp; ground it &nbsp;→&nbsp; then measure, deploy and observe it</p>
+    <div style="height:.8em"></div>
+    <p class="mono sub" style="font-size:.58em">
+      Google ADK · Gemini 3.6 Flash · BigQuery · Bigtable · Cloud Run<br>
+      Agent Runtime · BigQuery Agent Analytics · agents-cli eval
+    </p>
+  </div>
+  <aside class="notes">
+    Two acts, ~13 minutes if you run both. Don't introduce yourself for more than one line —
+    get to the operator's question fast.
+    Thesis to land early: THE MODEL IS A ROUTER; the hard parts were infrastructure.
+    Second thesis, landed in act two: every failure in this system was SILENT, so the only
+    defence is measurement.
+    If you have 8 minutes rather than 13, cut from slide 12 (the act break) to the takeaway.
+  </aside>
+</section>
+
+
+<!-- ══════════════ 2 · THE PROBLEM ══════════════ -->
+<section>
+  <div class="kicker">The question nobody can answer</div>
+  <div class="big" style="margin-bottom:.7em">
+    &ldquo;My Ginza store — is it about to <em>stock out</em>, is the
+    <em>card reader at lane 3</em> broken, and is <em>cashier 1190</em>
+    abusing manager overrides?&rdquo;
+  </div>
+  <div class="grid g3">
+    <div class="card b-blue"><div class="t">Data warehouse</div>
+      <div class="d">Inventory, sales, 7-day baselines</div></div>
+    <div class="card b-purple"><div class="t">A pile of PDFs</div>
+      <div class="d">Vendor service manuals nobody reads</div></div>
+    <div class="card b-green"><div class="t">Real-time store</div>
+      <div class="d">Live per-cashier counters</div></div>
+  </div>
+  <p style="margin-top:.9em;font-size:.82em">
+    Three systems. Three teams. Usually three days.<br>
+    <span class="sub">Nobody owns the question, because the question crosses all three.</span>
+  </p>
+  <aside class="notes">
+    45 seconds. Say the question out loud as an operator would. Then: "that's three systems,
+    three teams, three days." Pause. Don't rush into architecture.
+  </aside>
+</section>
+
+<!-- ══════════════ 3 · ARCHITECTURE ══════════════ -->
+<section>
+  <div class="kicker">The whole system</div>
+  <div class="center" style="margin-bottom:.8em">
+    <div class="node" style="display:inline-block;border-color:var(--blue)">
+      <div class="n">Coordinator Agent</div><div class="s">gemini-3.6-flash</div>
+    </div>
+  </div>
+  <div class="grid g4">
+    <div class="card b-blue"><div class="t">Analytics</div>
+      <div class="d">NL2SQL Data Agent<br>BigQuery gold tables</div>
+      <div class="m">~18s</div></div>
+    <div class="card b-purple"><div class="t">Runbook RAG</div>
+      <div class="d">VECTOR_SEARCH<br>129 manual chunks</div>
+      <div class="m">~2s</div></div>
+    <div class="card b-green"><div class="t">Real-time</div>
+      <div class="d">MCP on Cloud Run<br>Bigtable</div>
+      <div class="m">~3s warm</div></div>
+    <div class="card b-amber"><div class="t">Entity resolution</div>
+      <div class="d">VECTOR_SEARCH<br>16-store directory</div>
+      <div class="m">~2s</div></div>
+  </div>
+  <div class="callout" style="margin-top:.9em">
+    The model <strong>writes no ungoverned SQL</strong> and <strong>holds no data</strong>.
+    It picks a tool and passes arguments. Every tool is an ordinary service with ordinary IAM.
+  </div>
+  <aside class="notes">
+    60 seconds. Three beats:
+    (1) One model, four tools — it routes, it doesn't store.
+    (2) Latencies differ by an ORDER OF MAGNITUDE — 2s to 18s. That's a design constraint,
+        it dictates what fits in one turn.
+    (3) Every tool is an ordinary service with ordinary IAM. That's the point.
+    If asked about security: Bigtable tool is a PRIVATE Cloud Run service. Agent impersonates
+    a SA, mints an OIDC ID token scoped to the Cloud Run audience, calls with roles/run.invoker.
+    No public endpoint, no API keys.
+  </aside>
+</section>
+
+<!-- ══════════════ 4 · DEMO 1 ══════════════ -->
+<section data-background-color="#161b22">
+  <div class="center">
+    <div class="kicker">Demo 1 <span class="tag live">LIVE · 9.3s</span></div>
+    <h2 style="margin-bottom:.5em">It works — and it cites</h2>
+    <pre style="text-align:left"><code class="language-text">How do I fix error code ERR-PAY-4001
+on the POS EMV terminal reader?</code></pre>
+    <p class="sub" style="margin-top:.8em">Switch to <span class="mono">adk web</span></p>
+  </div>
+  <aside class="notes">
+    TALK OVER THE 9 SECONDS. Don't watch the spinner.
+    Say: "This isn't the model remembering a manual. It's embedding the question, running a
+    cosine search over 129 chunks of a real Toshiba service PDF, and stitching neighbouring
+    chunks so the procedure isn't cut in half."
+    THEN POINT AT TWO THINGS:
+    1. "Do NOT re-swipe immediately" — a vendor safety instruction. If the model invented this
+       it might say the opposite, and that's a duplicate charge on a customer's card.
+    2. The storage.cloud.google.com link — every answer carries its source PDF. An auditor can
+       click through. Ungrounded output is not an answer, it's a suggestion.
+  </aside>
+</section>
+
+<!-- ══════════════ 5 · DEMO 2 SETUP ══════════════ -->
+<section data-background-color="#161b22">
+  <div class="center">
+    <div class="kicker">Demo 2 <span class="tag live">LIVE · 5.3s</span></div>
+    <h2 style="margin-bottom:.5em">Now watch it <em>refuse</em></h2>
+    <pre style="text-align:left"><code class="language-text">What is the total on-hand inventory
+at the Ginza store?</code></pre>
+  </div>
+  <aside class="notes">
+    THIS IS YOUR BEST 40 SECONDS. Set it up BEFORE you type:
+    "Now watch what happens when the question is unanswerable."
+    Fastest demo you have — 5.3 seconds.
+  </aside>
+</section>
+
+<!-- ══════════════ 6 · THE REFUSAL ══════════════ -->
+<section>
+  <div class="kicker">Two stores. Identical names.</div>
+  <table>
+    <tr><th>store_id</th><th>store_name</th><th>city</th><th class="num">cosine</th></tr>
+    <tr><td class="mono info">STORE_001</td><td>Cymbal Tokyo Ginza District Flagship</td>
+        <td>Tokyo</td><td class="num mono">0.6955</td></tr>
+    <tr><td class="mono info">STORE_013</td><td>Cymbal Tokyo Ginza District Flagship</td>
+        <td>Tokyo</td><td class="num mono">0.6915</td></tr>
+  </table>
+  <p style="margin-top:.6em;font-size:.78em">
+    That gap is <strong>noise</strong>. A tool that returns the higher one doesn't throw an error.
+  </p>
+  <div class="callout red" style="margin-top:.7em">
+    It returns a confident, correctly-formatted answer about the <strong>wrong store</strong> —
+    and nobody ever finds out.
+  </div>
+  <p class="center big" style="margin-top:1em;font-size:1.15em">
+    The dangerous failure isn't the one that crashes.<br>
+    <em>It's the one that looks exactly like success.</em>
+  </p>
+  <aside class="notes">
+    Deliver the punchline slowly. Then the generalisation — this is the line to leave in
+    their heads.
+    ALSO SAY: the agent did NOT call the analytics tool at all here. The refusal is
+    structural, not cosmetic. There's a live integration test asserting exactly that.
+  </aside>
+</section>
+
+<!-- ══════════════ 7 · WHAT BIT US ══════════════ -->
+<section>
+  <div class="kicker">Three things that actually bit us</div>
+  <div class="rule"></div>
+  <div class="grid g3">
+    <div class="card b-red">
+      <div class="t">1 · The model was eating base64</div>
+      <div class="d" style="margin:.4em 0">
+        <span class="mono bad">"QLStkeuFHrk="</span> <span class="info">→</span>
+        <span class="mono ok">5293.57</span>
+      </div>
+      <div class="d">Bigtable returned packed IEEE-754 doubles. Gemini didn't error —
+        it quietly made things up. <strong>~150 lines of "working" code never ran.</strong></div>
+    </div>
+    <div class="card b-amber">
+      <div class="t">2 · Parallel wasn't parallel</div>
+      <div class="d" style="margin-top:.4em">Sync tools run on the event loop unless a thread
+        pool is configured — and <span class="mono">adk web</span> doesn't configure one.
+        Two "concurrent" tools ran back to back.
+        <strong>Nothing failed. It was just silently twice as slow.</strong></div>
+    </div>
+    <div class="card b-purple">
+      <div class="t">3 · Iceberg rejects row-level security</div>
+      <div class="d" style="margin-top:.4em">We chose an open table format for
+        interoperability. It cost us BigQuery-native governance.
+        <strong>A trade-off to make deliberately — not discover in production.</strong></div>
+    </div>
+  </div>
+  <p class="center sub" style="margin-top:1em;font-size:.75em">
+    Every one of these was <span class="warn">silent</span>. None threw an exception.
+  </p>
+  <aside class="notes">
+    100 seconds. If tight, do only #1 — it's the best story.
+    #1 lesson for the room: tool output is an API contract with a NON-DETERMINISTIC client.
+    Spare card if the room is infra-heavy: gemini-3.6-flash publishes only to `global`.
+    Our .env said us-central1, so every model call would have 404'd. Invisible until the
+    tests started loading .env.
+  </aside>
+</section>
+
+<!-- ══════════════ 8 · THE FLAW (setup) ══════════════ -->
+<section>
+  <div class="kicker">Where it's still wrong <span class="tag baked">PRE-BAKED · 42s</span></div>
+  <h3>Live vs. 7-day cashier comparison</h3>
+  <table>
+    <tr><th>Metric</th><th class="num">Live 1-hour</th><th class="num">7-day baseline</th><th class="num">Delta</th></tr>
+    <tr><td>Manual Override Rate</td><td class="num mono">71.05%</td>
+        <td class="num mono">94.6%</td><td class="num mono ok">−23.55pp</td></tr>
+  </table>
+  <p class="sub" style="margin-top:.8em;font-size:.8em">
+    Clean. Executive-ready. Two decimal places.
+  </p>
+  <aside class="notes">
+    DO NOT RUN LIVE — 42 seconds. Have it open in a second browser tab from before the talk.
+    "Here's one I ran earlier."
+    Let this slide sit for a beat. Let them accept it. THEN advance.
+  </aside>
+</section>
+
+<!-- ══════════════ 9 · THE REVEAL ══════════════ -->
+<section>
+  <div class="kicker">Where it's still wrong</div>
+  <div class="center">
+    <div class="huge">94.6%</div>
+    <p style="font-size:.85em;margin-top:.4em">is <strong>not</strong> an override rate.</p>
+  </div>
+  <div class="grid g2" style="margin-top:.9em">
+    <div class="card b-red"><div class="t">What it actually is</div>
+      <div class="d"><span class="mono">351</span> promo-abuse alerts ÷
+        <span class="mono">371</span> total alerts.<br>
+        The <strong>mix</strong> of this cashier's alert types.</div></div>
+    <div class="card b-amber"><div class="t">Why it can't be a rate</div>
+      <div class="d">Denominator is <strong>alerts</strong>, not transactions.
+        The alerts table has <strong>no transaction count at all</strong>.</div></div>
+  </div>
+  <div class="callout red" style="margin-top:.8em">
+    It compared a <strong>rate</strong> against a <strong>ratio</strong> and reported the
+    difference to two decimals. Every number is real. <strong>The subtraction is meaningless.</strong>
+  </div>
+  <aside class="notes">
+    This is your strongest slide. Showing a flaw in your own demo is the highest-trust move
+    available — a room of engineers assumes you're hiding something, and pre-empting it makes
+    everything else you claimed credible.
+    I verified this against the raw table: 351 cashier_promo_abuse + 20 order_anomaly = 371.
+  </aside>
+</section>
+
+<!-- ══════════════ 10 · SEMANTIC LAYER ══════════════ -->
+<section>
+  <div class="center">
+    <div class="kicker">The lesson</div>
+    <p class="big" style="font-size:1.35em;line-height:1.35">
+      NL2SQL doesn't fail by writing <span class="strike">broken SQL</span>.<br>
+      It fails by writing <em>valid</em> SQL<br>against a metric <em>nobody defined</em>.
+    </p>
+    <div style="height:.8em"></div>
+    <div class="callout green" style="text-align:left">
+      The semantic layer isn't documentation — it's the <strong>control plane</strong>.
+      If &ldquo;override rate&rdquo; isn't defined once, centrally, the model will define it
+      for you. Differently. Every time.
+    </div>
+  </div>
+  <aside class="notes">
+    Slow down here. This is the single most transferable idea in the talk, and it applies to
+    every NL2SQL / "chat with your data" product any of them will be asked to evaluate.
+  </aside>
+</section>
+
+<!-- ══════════════ 11 · AUTHZ ══════════════ -->
+<section>
+  <div class="kicker">Where authorisation lives</div>
+  <div class="flow" style="margin:1em 0">
+    <div class="node"><div class="n">End user</div><div class="s">OAuth token</div></div>
+    <span class="arrow">→</span>
+    <div class="node"><div class="n">session.state</div><div class="s">app/auth.py</div></div>
+    <span class="arrow">→</span>
+    <div class="node"><div class="n">BigQuery job</div><div class="s">SESSION_USER()</div></div>
+    <span class="arrow">→</span>
+    <div class="node" style="border-color:var(--green)"><div class="n">Row access policy</div>
+      <div class="s">store_id IN grants</div></div>
+  </div>
+  <div class="grid g2">
+    <div class="card b-red"><div class="t">A prompt is a <em>request</em></div>
+      <div class="d">&ldquo;Only show this manager their own store&rdquo; — evaluated by a
+        probabilistic system. Injection routes around it.</div></div>
+    <div class="card b-green"><div class="t">A row access policy is a <em>control</em></div>
+      <div class="d">Enforced by BigQuery beneath every tool. The model can be fully
+        compromised and still not read another tenant's rows.</div></div>
+  </div>
+  <p class="center" style="margin-top:.9em;font-size:.85em">
+    Proven, not assumed: granting one store collapsed visibility from
+    <span class="mono bad">65,368</span> rows to <span class="mono ok">1,233</span>.
+  </p>
+  <aside class="notes">
+    If someone asks "what stops it querying data I'm not allowed to see" — this is the slide.
+    Note both layers are required: delegation without RLS just changes whose name is on the
+    query; RLS without delegation isolates nothing because there's only ever one principal.
+  </aside>
+</section>
+
+<!-- ══════════════ 12 · ACT BREAK: SHIPPING IT ══════════════ -->
+<section data-background-color="#161b22">
+  <div class="center">
+    <div class="kicker">Part two · Module 3 deployment lab</div>
+    <h2 style="margin-bottom:.5em">A demo is not a service</h2>
+    <p class="sub" style="font-size:.8em;margin-bottom:1.2em">
+      Everything so far ran on my laptop, graded by me, observed by nobody.
+    </p>
+    <div class="grid g4" style="font-size:.9em">
+      <div class="card b-purple"><div class="t">Measure</div>
+        <div class="d">Automated quality gate</div></div>
+      <div class="card b-blue"><div class="t">Deploy</div>
+        <div class="d">Vertex AI Agent Runtime</div></div>
+      <div class="card b-green"><div class="t">Observe</div>
+        <div class="d">Telemetry to BigQuery</div></div>
+      <div class="card b-amber"><div class="t">Operate</div>
+        <div class="d">Ask the telemetry questions</div></div>
+    </div>
+  </div>
+  <aside class="notes">
+    30 seconds. This is the hinge of the talk. Say plainly: "up to here I've been showing you
+    a demo. A demo has one user, who is me, and I decide whether the answer was good.
+    Everything after this slide is about removing me from that sentence."
+    If you are tight on time, this act is the cut — jump straight to the takeaway.
+  </aside>
+</section>
+
+<!-- ══════════════ 13 · EVALUATION ══════════════ -->
+<section>
+  <div class="kicker">Stop grading your own homework</div>
+  <p style="font-size:.82em;margin-bottom:.5em">
+    Two metrics gate the build: does it call the <em>right tools</em>, and is every
+    sentence <em>supported by what those tools returned</em>?
+  </p>
+  <table>
+    <tr><th>Run</th><th>What <code>context</code> pointed at</th><th class="num">Grounding</th><th>What it actually measured</th></tr>
+    <tr><td class="mono">1</td><td>nothing</td><td class="num mono bad">error</td>
+        <td class="sub">Metric can't render without evidence — it fails the run, it doesn't skip</td></tr>
+    <tr><td class="mono">2</td><td>the lab's frozen snapshot</td><td class="num mono bad">0.000</td>
+        <td class="sub">Our answers vs <strong>someone else's</strong> agent's evidence</td></tr>
+    <tr><td class="mono">3</td><td>our own tool output</td><td class="num mono warn">0.500</td>
+        <td class="sub">The genuine baseline</td></tr>
+    <tr><td class="mono">4</td><td>same, after a grounding rule</td><td class="num mono ok">0.800</td>
+        <td class="sub">Post-remediation</td></tr>
+  </table>
+  <div class="callout red" style="margin-top:.7em">
+    That <strong>0.000</strong> was <strong>my</strong> bug, not the agent's. 58 &ldquo;unsupported&rdquo;
+    sentences because our correct citations weren't in their evidence file, and live tables
+    return today's numbers against a stale snapshot.
+  </div>
+  <aside class="notes">
+    60 seconds. The point is NOT "we scored 0.8". The point is that run 2 looked like a
+    catastrophic agent failure and was actually a broken measurement. If you ship the
+    dashboard before you've validated the metric, you will spend a week fixing the wrong thing.
+    Watch the scale: agents-cli scores 0-1. The lab's "4.0 out of 5.0" bar is 0.80, not 4.00.
+  </aside>
+</section>
+
+<!-- ══════════════ 14 · THE REGRESSION ══════════════ -->
+<section>
+  <div class="kicker">What the gate caught</div>
+  <div class="grid g2">
+    <div class="card b-amber">
+      <div class="t">The trade I made</div>
+      <div class="d" style="margin-top:.4em">
+        Grounding <span class="mono ok">+0.300</span> &nbsp;·&nbsp;
+        tool-use <span class="mono bad">&minus;0.074</span><br><br>
+        Terser, better-grounded answers lost some traceability to source wording.
+        <strong>Reported, not buried.</strong>
+      </div>
+    </div>
+    <div class="card b-red">
+      <div class="t">The real catch</div>
+      <div class="d" style="margin-top:.4em">
+        Prompt named only <span class="mono">CASH_1190</span>.<br>
+        The agent queried <span class="mono bad">STORE_048</span>.<br><br>
+        It <strong>invented</strong> a store ID by inferring it from a cashier ID.
+      </div>
+    </div>
+  </div>
+  <div class="callout red" style="margin-top:.8em">
+    A wrong identifier doesn't raise an error. It returns a clean, confident, correctly
+    formatted answer <strong>about a store that has nothing to do with the question</strong>.
+    Same failure mode as the two Ginza stores — found by a test this time, not by me.
+  </div>
+  <p class="center sub" style="margin-top:.7em;font-size:.72em">
+    Fixed: identifiers may only come from the user verbatim or from a tool result. Never derived.
+  </p>
+  <aside class="notes">
+    50 seconds. This is the payoff for the whole evaluation act, and it rhymes deliberately
+    with the Ginza slide — same class of silent failure, but this time infrastructure caught
+    it instead of me noticing by luck. That is the entire argument for having an eval suite.
+    If asked why tool-use went DOWN: I chose to ship that trade and write it in the report.
+    Hiding a regression to make a slide cleaner is how you lose the room.
+  </aside>
+</section>
+
+<!-- ══════════════ 15 · DEPLOYMENT ══════════════ -->
+<section>
+  <div class="kicker">Deployed · Vertex AI Agent Runtime</div>
+  <div class="flow" style="margin:.8em 0">
+    <div class="node"><div class="n">agents-cli deploy</div><div class="s">manifest + uv.lock</div></div>
+    <span class="arrow">→</span>
+    <div class="node"><div class="n">Cloud Build</div><div class="s">container</div></div>
+    <span class="arrow">→</span>
+    <div class="node" style="border-color:var(--blue)"><div class="n">Reasoning Engine</div>
+      <div class="s">us-central1</div></div>
+    <span class="arrow">→</span>
+    <div class="node" style="border-color:var(--green)"><div class="n">cymbal-sa-data@</div>
+      <div class="s">its own identity</div></div>
+  </div>
+  <div class="callout red">
+    <strong>The deploy succeeded and the agent was broken.</strong>
+    The runtime service account wasn't in the row access policy — and once <em>any</em> policy
+    exists on a table, BigQuery returns <strong>zero rows, not an error</strong>, to a principal
+    it doesn't match.
+  </div>
+  <p style="margin-top:.8em;font-size:.78em">
+    Every layer reports healthy. The agent politely tells every user
+    &ldquo;no data found&rdquo; &mdash; forever.
+  </p>
+  <p class="center sub mono" style="margin-top:.8em;font-size:.66em">
+    Verified with three live probes after the grant · RAG 33.0s cold ·
+    store resolution 5.5s · analytics returned <span class="ok">1,348 rows</span>
+  </p>
+  <aside class="notes">
+    60 seconds, and it's an infra-audience slide — lean into it.
+    The identity changes at deploy time: locally the agent runs as ME, with my permissions.
+    In the runtime it runs as a service account that has never been granted anything.
+    RLS turning a permission gap into an empty result instead of a 403 is the nastiest
+    variant of that, because the failure is indistinguishable from "there is no data".
+    The fix is now checked into sql/04 so the next person doesn't rediscover it in prod.
+  </aside>
+</section>
+
+<!-- ══════════════ 16 · TELEMETRY ══════════════ -->
+<section>
+  <div class="kicker">Observability, without an observability project</div>
+  <div class="grid g2" style="margin-bottom:.8em">
+    <div class="card b-green">
+      <div class="t">One plugin registration</div>
+      <div class="d" style="margin-top:.35em">
+        <span class="mono">BigQueryAgentAnalyticsPlugin</span> streams every prompt, response,
+        tool argument, latency and token count over the Storage Write API.
+        Background batcher &mdash; agent latency is not coupled to BigQuery.
+      </div>
+      <div class="m" style="margin-top:.4em">320 events · 24 turns · 4 tools · 23 auto-created views</div>
+    </div>
+    <div class="card b-amber">
+      <div class="t">Two defaults that quietly break it</div>
+      <div class="d" style="margin-top:.35em">
+        <span class="mono">location="US"</span> &rarr; write stream resolves to a different
+        BigQuery instance than a single-region dataset.<br><br>
+        <span class="mono">table_id="agent_events"</span> &rarr; views are named after the
+        table, so nothing downstream lines up.
+      </div>
+    </div>
+  </div>
+  <div class="callout">
+    Wired <strong>fail-open</strong>: if telemetry can't start, the agent still serves traffic.
+    Losing observability should never become an outage.
+  </div>
+  <aside class="notes">
+    40 seconds. The infra framing: you did not stand up a logging pipeline, a collector, or a
+    dashboards project. You registered a plugin and got a queryable event table with 23 views
+    over it. The cost is a BigQuery dataset.
+    If asked about PII: content is captured, so this dataset inherits the sensitivity of your
+    prompts — treat it as production data, not as logs.
+  </aside>
+</section>
+
+<!-- ══════════════ 17 · ASK THE TELEMETRY ══════════════ -->
+<section>
+  <div class="kicker">Now ask your telemetry a question</div>
+  <pre style="margin-bottom:.5em"><code class="language-text">"Aggregate total input and output tokens and request count grouped by model."</code></pre>
+  <p style="font-size:.75em;margin-bottom:.5em">
+    A Conversational Analytics agent over <span class="mono">agent_telemetry</span> wrote
+    correct GoogleSQL against the auto-generated views. 4 of 4 recipes succeeded.
+    <strong>And the answer was still wrong.</strong>
+  </p>
+  <table>
+    <tr><th>Token bucket</th><th class="num">Tokens</th><th>Billed as output?</th></tr>
+    <tr><td><span class="mono">usage_completion_tokens</span> &mdash; what it reported</td>
+        <td class="num mono">12,101</td><td class="ok">yes</td></tr>
+    <tr><td><span class="mono">usage_thinking_tokens</span> &mdash; what it omitted</td>
+        <td class="num mono bad">15,218</td><td class="ok">yes</td></tr>
+    <tr><td><strong>True billable output</strong></td>
+        <td class="num mono ok"><strong>27,319</strong></td><td class="sub">2.26&times; the reported figure</td></tr>
+  </table>
+  <div class="callout red" style="margin-top:.7em">
+    It picked the column whose <strong>name matched the question</strong>, not the one that
+    matches the <strong>invoice</strong>. Reasoning tokens are 56% of output spend here.
+  </div>
+  <aside class="notes">
+    60 seconds. Deliberate callback to the 94.6% slide — same lesson, one layer up.
+    NL2SQL wrote valid SQL against an undefined metric. "Output tokens" is not a defined
+    term in this schema; there are two candidate columns and only one of them is billed
+    the way a finance person means.
+    The generalisation for the room: this is why you keep a reference query. We cross-checked
+    every recipe against hand-written SQL, which is the only reason we caught it.
+  </aside>
+</section>
+
+<!-- ══════════════ 18 · DASHBOARD ══════════════ -->
+<section>
+  <div class="kicker">Five panels · 17 charts · zero errors</div>
+  <div class="grid g3" style="margin-bottom:.7em">
+    <div class="card b-blue"><div class="t">Where the time goes</div>
+      <div class="d"><span class="mono">cymbal_analytics_tool</span><br>
+        <span class="mono warn">18.6s avg</span> · <span class="mono">57.6%</span> of all calls</div></div>
+    <div class="card b-green"><div class="t">What users feel</div>
+      <div class="d">p50 TTFT <span class="mono ok">3.3s</span><br>
+        p95 <span class="mono warn">9.1s</span></div></div>
+    <div class="card b-purple"><div class="t">Reliability</div>
+      <div class="d">0 tool errors<br>
+        <span class="sub">confirmed across 4 widening queries</span></div></div>
+  </div>
+  <p style="font-size:.75em;margin-bottom:.5em">
+    The slowest tool is also the most-called one &mdash; that's the optimisation target,
+    and you can only see it by joining two panels.
+  </p>
+  <div class="callout red">
+    The official dashboard flagged <strong>every span as an error</strong> on a run with none.
+    A NULL <span class="mono">error_message</span> arrives from BigQuery as
+    <span class="mono">NaN</span>, and <span class="mono">bool(NaN)</span> is
+    <span class="mono">True</span> in Python. Another cell on the same page said
+    &ldquo;no errors&rdquo;. <strong>Patched locally.</strong>
+  </div>
+  <aside class="notes">
+    50 seconds. Two beats.
+    Beat one — the useful finding: slowest tool == most-called tool. Nobody would have
+    guessed that; both panels are needed to see it. That tool is itself an LLM call
+    (text-to-SQL, then execute), so it pays two round trips.
+    Beat two — the bug. A dashboard that contradicts itself is worse than no dashboard,
+    because it trains people to ignore red. This is the third silent failure in the talk:
+    base64, zero-rows-not-error, and now NaN-is-truthy. That's the through-line.
+  </aside>
+</section>
+
+<!-- ══════════════ 19 · TAKEAWAY ══════════════ -->
+
+<section>
+  <div class="kicker">Takeaway</div>
+  <div class="rule"></div>
+  <div class="grid" style="gap:.6em">
+    <div class="card b-blue"><div class="t">1 · The model is a router</div>
+      <div class="d">It holds no data and no permissions of its own.
+        Everything hard about this was infrastructure.</div></div>
+    <div class="card b-green"><div class="t">2 · Authorisation belongs below the model</div>
+      <div class="d">Prompts are requests. Row access policies are controls.</div></div>
+    <div class="card b-purple"><div class="t">3 · Grounding and refusal are features</div>
+      <div class="d">The system that says &ldquo;I don't know which store you mean&rdquo;
+        is the one you can put in front of an auditor.</div></div>
+    <div class="card b-red"><div class="t">4 · Every failure here was silent</div>
+      <div class="d">Base64 as numbers · zero rows instead of 403 · a wrong store ID ·
+        <span class="mono">NaN</span> as an error. None threw.
+        <strong>You do not find these by watching. You find them by measuring.</strong></div></div>
+  </div>
+  <p class="center sub mono" style="margin-top:.9em;font-size:.6em">
+    30 unit / 7 integration tests · eval gate tool-use <span class="ok">0.909</span> ·
+    grounding <span class="ok">0.800</span> · deployed to Agent Runtime · 320 telemetry events
+  </p>
+  <aside class="notes">
+    Four lines, then STOP. Don't trail off into "so yeah, that's it".
+    Point 4 is the new one and it's the one that ties both labs together — the first half of
+    the talk was me finding silent failures by accident, the second half was building the
+    machinery that finds them on purpose. End there and take questions.
+  </aside>
+</section>
+
+
+<!-- ══════════════ 13 · BACKUP: FALLBACK 1 ══════════════ -->
+<section>
+  <div class="kicker">Backup · Demo 1 output</div>
+  <h3 style="font-size:.95em">ERR-PAY-4001 — EMV PIN Pad Tokenization Timeout</h3>
+  <ol style="font-size:.72em">
+    <li><strong>Do NOT re-swipe or re-charge immediately</strong> — prevents duplicate authorizations</li>
+    <li><strong>Reboot the payment module</strong> — hold <span class="mono">Yellow + #</span> for 3 seconds</li>
+    <li><strong>Check cable connections</strong> — 12V PoweredUSB seated at both ends</li>
+    <li><strong>Manager Menu → Journal Audit Slip</strong>:
+      <span class="mono ok">AUTHORIZED_UNSETTLED</span> → print receipt ·
+      <span class="mono bad">VOIDED_ERROR</span> → re-scan and re-present card</li>
+  </ol>
+  <p class="sub" style="font-size:.68em">Source: Toshiba TCx 810 POS Hardware, Diagnostics &amp; Service Guide</p>
+  <aside class="notes">Use if the live demo fails. This is genuine captured output.</aside>
+</section>
+
+<!-- ══════════════ 14 · BACKUP: NUMBERS ══════════════ -->
+<section>
+  <div class="kicker">Backup · Measured on this system</div>
+  <table>
+    <tr><th>Prompt</th><th class="num">Latency</th><th>Tools dispatched</th></tr>
+    <tr><td>Hardware error → runbook</td><td class="num mono ok">9.3s</td><td class="mono sub">rag</td></tr>
+    <tr><td>&ldquo;the Ginza store&rdquo; → refuses</td><td class="num mono ok">5.3s</td><td class="mono sub">resolve</td></tr>
+    <tr><td>Live cashier metrics</td><td class="num mono warn">15.7s</td><td class="mono sub">bigtable</td></tr>
+    <tr><td>Live vs 7-day comparison</td><td class="num mono bad">42.4s</td><td class="mono sub">bigtable + analytics (parallel)</td></tr>
+    <tr><td>&ldquo;our Paris flagship&rdquo; → STORE_007</td><td class="num mono bad">35.2s</td><td class="mono sub">resolve → analytics</td></tr>
+  </table>
+  <div class="grid g3" style="margin-top:.9em">
+    <div class="card"><div class="t">Retrieval corpus</div><div class="d">129 chunks · 5 docs · 768-dim</div></div>
+    <div class="card"><div class="t">Ranking caveat</div><div class="d">Pure cosine ranks the <em>wrong</em> vendor first: HP 0.7028 vs Toshiba 0.6920</div></div>
+    <div class="card"><div class="t">Cost guardrails</div><div class="d">Byte cap · row cap · BigQuery custom quota</div></div>
+  </div>
+  <aside class="notes">
+    Numbers slide for Q&A. The HP/Toshiba point is worth volunteering if anyone asks how you
+    know retrieval quality is good — it shows you measured rather than assumed.
+  </aside>
+</section>
+
+<!-- ══════════════ 15 · BACKUP: Q&A ══════════════ -->
+<section>
+  <div class="kicker">Backup · Likely questions</div>
+  <table style="font-size:.62em">
+    <tr><th style="width:32%">Question</th><th>Answer</th></tr>
+    <tr><td><strong>Why not just write the SQL?</strong></td>
+        <td>You'd write it four times for four questions. The value is routing across three
+            storage systems behind one question. We <em>did</em> hand-write the retrieval SQL —
+            only the warehouse layer is generated.</td></tr>
+    <tr><td><strong>71% override rate? Absurd.</strong></td>
+        <td>Correct — synthetic lab data. The plumbing is real; the numbers are generated.</td></tr>
+    <tr><td><strong>How do you know retrieval is right?</strong></td>
+        <td>We measure it. Reported score is true cosine, never inflated. Pure cosine ranks the
+            wrong vendor first, so exact error-code match is a separate admission signal kept
+            out of the score.</td></tr>
+    <tr><td><strong>Why MCP, not a direct client?</strong></td>
+        <td>Separate deployable, own IAM, own release cycle. We changed its query config without
+            redeploying the agent.</td></tr>
+    <tr><td><strong>Production ready?</strong></td>
+        <td>Closer, but no. It now has a quality gate, telemetry and a real deployment.
+            Still open: end-user OAuth is unit-tested but never exercised with a real token,
+            the semantic-layer gap you saw, and 24 turns is not enough traffic for the p95s
+            to mean anything.</td></tr>
+    <tr><td><strong>Why is the eval score 0.9 and not 4.5?</strong></td>
+        <td>The CLI scores 0&ndash;1. The lab's &ldquo;4.0 / 5.0&rdquo; bar is <strong>0.80</strong>.
+            Easiest way to misread these results is to assume a 5-point scale and conclude
+            everything failed.</td></tr>
+    <tr><td><strong>What does telemetry cost?</strong></td>
+        <td>A BigQuery dataset. Writes go over the Storage Write API on a background batcher,
+            so it doesn't sit in the request path. It captures prompt and response
+            <em>content</em>, though &mdash; treat the dataset as production data, not as logs.</td></tr>
+    <tr><td><strong>Is it in Gemini Enterprise?</strong></td>
+        <td>App created and the agent registration call is correct, but the project has no
+            Gemini Enterprise licence allocated &mdash; that's a procurement action, not a
+            config one. Everything up to that line is done.</td></tr>
+  </table>
+
+  <aside class="notes">Don't present this — jump here during Q&A if useful.</aside>
+</section>
+
+</div></div>
+
+<script src="reveal/reveal.js"></script>
+<script src="reveal/plugin/highlight/plugin.js"></script>
+<script src="reveal/plugin/notes/plugin.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    width: 1280, height: 720,
+    margin: 0.06,
+    transition: 'fade',
+    transitionSpeed: 'fast',
+    plugins: [ RevealHighlight, RevealNotes ]
+  });
+</script>
+</body>
+</html>

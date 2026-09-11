@@ -59,3 +59,60 @@ Ask the user: Option A (simple single-project) or Option B (full CI/CD pipeline 
 - **Run Python with `uv`**: `uv run python script.py`. Run `agents-cli install` first.
 - **Stop on repeated errors**: If the same error appears 3+ times, fix the root cause instead of retrying.
 - **Terraform conflicts** (Error 409): Use `terraform import` instead of retrying creation.
+
+---
+
+## Environment Gotchas
+
+### `uv` fails with "No solution found" / index 401
+
+On a corp machine `~/.config/uv/uv.toml` may set a private Artifact Registry
+mirror as the **default** index. When its credential expires, `uv` cannot see
+the real version set on PyPI and reports a dependency conflict rather than an
+auth error — e.g. claiming `a2a-sdk[http-server]>=1.0,<2` is unsatisfiable,
+with the 401 buried in a trailing `hint:`. Any `uv run` then fails, which
+takes `agents-cli` down with it.
+
+```bash
+export UV_DEFAULT_INDEX=https://pypi.org/simple
+```
+
+`UV_INDEX_URL` and `--index-url` do **not** override a `uv.toml` default;
+`UV_DEFAULT_INDEX` and `--default-index` do.
+
+To bypass `uv` entirely for a one-off, call the venv directly:
+`./.venv/bin/python script.py`.
+
+### Verify the lockfile before deploying
+
+Agent Runtime's build cannot authenticate to a private index. After any
+relock:
+
+```bash
+grep -c "artifact-foundry" uv.lock   # must be 0
+```
+
+### `uv lock` keeps stale pins
+
+`uv lock` preserves existing pins unless you pass `--upgrade-package <name>`.
+Raising a floor in `pyproject.toml` is not enough. If a version below the new
+floor is already pinned, uv may keep it and silently drop an extra with only
+a warning — which surfaces later as an `ImportError` at runtime.
+
+### `agents-cli eval run` times out booting the app
+
+`eval run` starts its own server with `uv run uvicorn app.fast_api_app:app`
+and gives it 30s. This app needs longer (the A2A agent card is built at
+startup), and that internal `uv run` **re-syncs the venv from the lockfile**.
+Pre-start the server and point the CLI at it:
+
+```bash
+adk web --port 8000                     # from cymbal-agent/
+agents-cli eval run --url http://127.0.0.1:8000 --app-name app ...
+```
+
+### Eval scores are 0–1, not 1–5
+
+A rubric target of "4.0 / 5.0" means **0.80**. Reading 0.909 as a failure
+against a 4.0 bar is the most common misreading of these results.
+
