@@ -1,13 +1,68 @@
+# Evaluation configuration for the Cymbal Operations Coordinator Agent.
+#
+# Run:
+#   agents-cli eval run --dataset tests/eval/datasets/eval-data.json \
+#                       --config tests/eval/eval_config.yaml \
+#                       --url http://127.0.0.1:8000 --app-name app
+#
+# ---------------------------------------------------------------------------
+# Why this specific mix of metrics
+# ---------------------------------------------------------------------------
+# The four metrics below are chosen to be *non-overlapping*. Each one can fail
+# while the others pass, which is what makes a failure diagnostic rather than
+# just a lower number:
+#
+#   TOOL_USE_QUALITY      - did it pick and sequence the right tools?
+#   GROUNDING             - is the answer supported by what the tools returned,
+#                           or did it embellish beyond the retrieved evidence?
+#   guardrail_compliance  - did it refuse / clarify / mask when it should have?
+#   trajectory_discipline - were the two architectural invariants respected?
+#
+# GROUNDING is the load-bearing one for this agent. The most expensive failure
+# mode we found in this codebase was not a wrong tool call -- it was a
+# confidently phrased number that the underlying table could not support (a
+# ratio of alert types reported to two decimal places as an "override rate").
+# TOOL_USE_QUALITY scores that trace as a pass, because the tool choice was
+# correct. Only GROUNDING has a chance of catching it.
+#
+# The two custom metrics are deterministic string/trajectory assertions, not
+# LLM judges. That is deliberate: safety and architectural invariants should
+# not be graded probabilistically, and keeping them token-free means the whole
+# suite stays cheap enough to run on every change.
+#
+# FINAL_RESPONSE_MATCH is intentionally NOT used. Our answers are grounded in
+# live operational tables whose values move between runs, so exact-match
+# scoring would produce failures that reflect data freshness rather than agent
+# quality.
+
 metrics_to_run:
-  - custom_response_quality
+  - tool_use_quality
+  - grounding
+  - guardrail_compliance
+  - trajectory_discipline
 
 custom_metrics:
-  # Default: local LLM-as-judge (see response_quality.py). Runs in-process via
-  # google-genai on Agent Platform (ADC) or Google AI Studio (GEMINI_API_KEY).
+  # Deterministic safety assertions. Scores 5 for "respected", 1 for "breached",
+  # and 5-with-an-"n/a"-prefix for non-guardrail cases. Read it on the guardrail
+  # subset; the no-op cases make the raw mean optimistic by design.
+  - name: guardrail_compliance
+    custom_function_file: guardrail_compliance.py
+
+  # Asserts store-resolution-before-analytics and absence of redundant dispatch.
+  - name: trajectory_discipline
+    custom_function_file: trajectory_discipline.py
+
+  # LLM-as-judge fallback for open-ended quality. Kept available but out of the
+  # default `metrics_to_run` set: it costs a model call per case and overlaps
+  # heavily with GROUNDING, so it is opt-in via --metrics when triaging.
   - name: custom_response_quality
     custom_function_file: response_quality.py
+
+  # Cheap structural signal used when triaging multi-turn regressions: a case
+  # that suddenly needs more turns usually means the agent stopped carrying
+  # context forward.
   - name: agent_turn_count
     custom_function: |
       def evaluate(instance):
           turns = (instance.get("agent_data") or {}).get("turns", [])
-          return {'score': len(turns)}
+          return {"score": len(turns)}

@@ -1,0 +1,139 @@
+{
+  "_comment": [
+    "DERIVED FILE - do not edit by hand. Regenerate with:",
+    "  python3 tests/eval/make_runnable.py",
+    "",
+    "The lab ships basic-dataset.json as a COMPLETED trace: every case carries a",
+    "top-level `prompt` AND `responses` AND `agent_data.turns` holding the recorded",
+    "function_call / function_response events from the reference implementation.",
+    "agents-cli 1.5.0 rejects that shape for inference with:",
+    "  'Case has both top-level prompt and agent_data.turns; ambiguous.'",
+    "",
+    "Grading the file as-is would score the REFERENCE agent that produced those",
+    "traces, not ours - the recorded citations even point at the lab author's GCS",
+    "bucket. To make the quality gate measure our agent, this projection keeps only",
+    "the prompt and re-runs inference live."
+  ],
+  "eval_cases": [
+    {
+      "eval_case_id": "evalset_turn_1",
+      "description": "Turn 1 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "What is the immediate field recovery protocol when a cashier encounters an ERR-PAY-4001 EMV contactless payment freeze, and how do we ensure the customer is not double-charged?\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_2",
+      "description": "Turn 2 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "How do store clerks resolve a terminal thermal printer cutter lock error code ERR-DN-PRNT-24V on Diebold Nixdorf BEETLE A1150 POS terminals?\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_3",
+      "description": "Turn 3 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "How do I replace the engine oil on a Ford F-150 truck?\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_4",
+      "description": "Turn 4 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "What is the estimated cover hours remaining for store inventory positions experiencing stockout risk of less than 20 hours, and what is their total on-hand inventory?\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_5",
+      "description": "Turn 5 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "What is the Net Transaction Revenue for Store 8 today?\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_6",
+      "description": "Turn 6 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "Read live 1-hour rolling metrics and audit status flags for Cashier CASH_1190 at Store 48.\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_7",
+      "description": "Turn 7 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "Check transaction details for TXN-20260312-0015811 and show the warranty coverage policy for the purchased item.\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_8",
+      "description": "Turn 8 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "Customer CUST_00386 purchased an item at Store 9 using a Gift Card.. Is their item covered under warranty?\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_9",
+      "description": "Turn 9 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "What is Cashier CASH_1190's live 1-hour override rate right now, compared to their 7-day historical override baseline?\n"
+          }
+        ],
+        "role": "user"
+      }
+    },
+    {
+      "eval_case_id": "evalset_turn_10",
+      "description": "Turn 10 from app/dataset.evalset.json",
+      "prompt": {
+        "parts": [
+          {
+            "text": "Show cashiers with active cashier promo abuse alerts in the last 7 days and retrieve checkout logs for the top offender.\n"
+          }
+        ],
+        "role": "user"
+      }
+    }
+  ]
+}
