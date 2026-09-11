@@ -15,6 +15,10 @@ dependencies = [
     "aiohttp>=3.13.4",
     "google-cloud-logging>=3.12.0,<4.0.0",
     "google-cloud-aiplatform[evaluation,agent-engines]>=1.156.0,<2.0.0",
+    # Imported directly by app/tools/rag_tool.py (BigQuery VECTOR_SEARCH) and
+    # app/tools/bigtable_tool.py (compute service account resolution for OIDC).
+    "google-cloud-bigquery>=3.25.0,<4.0.0",
+    "google-cloud-resource-manager>=1.12.0,<2.0.0",
     "protobuf>=6.31.1,<7.0.0",
     "mcp>=1.29.0,<2",
     "aiosqlite>=0.20.0",
@@ -94,6 +98,9 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 pythonpath = "."
 asyncio_default_fixture_loop_scope = "session"
+markers = [
+    "slow: multi-turn live agent tests (parallel / sequential dispatch); deselect with -m 'not slow'",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app","frontend"]
